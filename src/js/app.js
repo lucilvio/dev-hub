@@ -1592,6 +1592,60 @@ function createRemoteRepoItem(remoteRepo, { organization, project }) {
   return item;
 }
 
+function formatCloneProgressMessage(progress) {
+  if (!progress) return 'Cloning…';
+
+  const parts = [progress.label || 'Cloning'];
+  if (Number.isFinite(progress.percent)) {
+    parts[0] = `${parts[0]} — ${progress.percent}%`;
+  }
+  if (progress.detail) {
+    parts.push(progress.detail);
+  }
+  return parts.join(' · ');
+}
+
+function ensureCloneProgressElement(itemEl) {
+  let progressEl = itemEl.querySelector('.clone-progress');
+  if (progressEl) return progressEl;
+
+  progressEl = document.createElement('div');
+  progressEl.className = 'clone-progress';
+  progressEl.innerHTML = `
+    <div class="clone-progress-track">
+      <div class="clone-progress-fill"></div>
+    </div>
+    <p class="clone-progress-label"></p>
+  `;
+  itemEl.appendChild(progressEl);
+  return progressEl;
+}
+
+function updateCloneProgressUi(itemEl, progress) {
+  const progressEl = ensureCloneProgressElement(itemEl);
+  const trackEl = progressEl.querySelector('.clone-progress-track');
+  const fillEl = progressEl.querySelector('.clone-progress-fill');
+  const labelEl = progressEl.querySelector('.clone-progress-label');
+  const indeterminate = progress?.indeterminate || !Number.isFinite(progress?.percent);
+
+  trackEl.classList.toggle('is-indeterminate', indeterminate);
+  if (indeterminate) {
+    fillEl.style.width = '';
+  } else {
+    fillEl.style.width = `${Math.max(0, Math.min(100, progress.percent))}%`;
+  }
+
+  labelEl.textContent = formatCloneProgressMessage(progress);
+  progressEl.classList.remove('hidden');
+}
+
+function clearCloneProgressUi(itemEl) {
+  const progressEl = itemEl?.querySelector('.clone-progress');
+  if (progressEl) {
+    progressEl.remove();
+  }
+}
+
 async function cloneRemoteRepository(remoteRepo, buttonEl) {
   const clonePath = getClonePath();
   if (!clonePath) {
@@ -1602,18 +1656,29 @@ async function cloneRemoteRepository(remoteRepo, buttonEl) {
     return;
   }
 
+  const itemEl = buttonEl.closest('.remote-repo-item');
   const originalLabel = buttonEl.textContent;
+  const cloneId = crypto.randomUUID();
   buttonEl.disabled = true;
   buttonEl.textContent = 'Cloning…';
+  updateCloneProgressUi(itemEl, { label: 'Starting clone', percent: 0, indeterminate: false });
+  setRemoteReposStatus(`Cloning "${remoteRepo.name}"…`, 'warning');
+
+  const unsubscribe = api.repos.onCloneProgress(cloneId, (progress) => {
+    updateCloneProgressUi(itemEl, progress);
+    setRemoteReposStatus(`Cloning "${remoteRepo.name}" — ${formatCloneProgressMessage(progress)}`, 'warning');
+  });
 
   try {
     const result = await api.repos.clone({
       remoteUrl: remoteRepo.remoteUrl,
       repoName: remoteRepo.name,
       targetParent: clonePath,
+      cloneId,
     });
 
     if (!(await ensureApiOk(result, 'Clone repository'))) {
+      setRemoteReposStatus(`Failed to clone "${remoteRepo.name}"`, 'error');
       return;
     }
 
@@ -1625,8 +1690,11 @@ async function cloneRemoteRepository(remoteRepo, buttonEl) {
       openProject(cloned);
     }
   } catch (err) {
+    setRemoteReposStatus(`Failed to clone "${remoteRepo.name}"`, 'error');
     await reportError(err, 'Clone repository');
   } finally {
+    unsubscribe();
+    clearCloneProgressUi(itemEl);
     buttonEl.disabled = false;
     buttonEl.textContent = originalLabel;
   }

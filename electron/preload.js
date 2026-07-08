@@ -60,6 +60,12 @@ contextBridge.exposeInMainWorld('devHub', {
   repos: {
     scan: () => ipcRenderer.invoke('repos:scan'),
     clone: (opts) => ipcRenderer.invoke('repos:clone', opts),
+    onCloneProgress: (cloneId, callback) => {
+      const channel = `repos:clone-progress:${cloneId}`;
+      const handler = (_event, progress) => callback(progress);
+      ipcRenderer.on(channel, handler);
+      return () => ipcRenderer.removeListener(channel, handler);
+    },
     delete: (repoPath) => ipcRenderer.invoke('repos:delete', { repoPath }),
     readme: (repoPath) => ipcRenderer.invoke('repos:readme', { repoPath }),
     recentCommits: (repoPath) => ipcRenderer.invoke('repos:recentCommits', { repoPath }),

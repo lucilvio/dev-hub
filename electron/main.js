@@ -1741,7 +1741,127 @@ ipcMain.handle('repos:scan', () => {
   }));
 });
 
-ipcMain.handle('repos:clone', async (_event, { remoteUrl, repoName, targetParent }) => {
+function parseGitCloneProgress(line) {
+  const trimmed = line.replace(/\r/g, '').trim();
+  if (!trimmed) return null;
+
+  if (/^Cloning into /i.test(trimmed)) {
+    return { phase: 'starting', label: 'Starting clone', percent: 0, indeterminate: false };
+  }
+
+  let match = trimmed.match(/Receiving objects:\s+(\d+)%\s+\((\d+)\/(\d+)\)(?:,\s+(.+))?/);
+  if (match) {
+    return {
+      phase: 'receiving',
+      label: 'Receiving objects',
+      percent: Number.parseInt(match[1], 10),
+      current: Number.parseInt(match[2], 10),
+      total: Number.parseInt(match[3], 10),
+      detail: match[4]?.trim() || '',
+      indeterminate: false,
+    };
+  }
+
+  match = trimmed.match(/Resolving deltas:\s+(\d+)%\s+\((\d+)\/(\d+)\)/);
+  if (match) {
+    return {
+      phase: 'resolving',
+      label: 'Resolving deltas',
+      percent: Number.parseInt(match[1], 10),
+      current: Number.parseInt(match[2], 10),
+      total: Number.parseInt(match[3], 10),
+      indeterminate: false,
+    };
+  }
+
+  match = trimmed.match(/Checking out files:\s+(\d+)%\s+\((\d+)\/(\d+)\)/);
+  if (match) {
+    return {
+      phase: 'checkout',
+      label: 'Checking out files',
+      percent: Number.parseInt(match[1], 10),
+      current: Number.parseInt(match[2], 10),
+      total: Number.parseInt(match[3], 10),
+      indeterminate: false,
+    };
+  }
+
+  match = trimmed.match(/(?:remote:\s+)?(Enumerating|Counting|Compressing) objects:\s+(\d+)%\s+\((\d+)\/(\d+)\)/i);
+  if (match) {
+    return {
+      phase: match[1].toLowerCase(),
+      label: `${match[1]} objects`,
+      percent: Number.parseInt(match[2], 10),
+      current: Number.parseInt(match[3], 10),
+      total: Number.parseInt(match[4], 10),
+      indeterminate: false,
+    };
+  }
+
+  match = trimmed.match(/(?:remote:\s+)?(Enumerating|Counting|Compressing) objects:\s+(\d+)/i);
+  if (match) {
+    return {
+      phase: match[1].toLowerCase(),
+      label: `${match[1]} objects`,
+      indeterminate: true,
+    };
+  }
+
+  if (/remote:\s+Total\s+\d+/i.test(trimmed)) {
+    return { phase: 'remote', label: 'Preparing remote', indeterminate: true };
+  }
+
+  return null;
+}
+
+function sanitizeCloneOutput(text, pat) {
+  if (!text) return '';
+  const escapedPat = pat.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return text.replace(new RegExp(escapedPat, 'g'), '***').trim();
+}
+
+function runGitCloneWithProgress(cloneUrl, targetPath, pat, onProgress) {
+  return new Promise((resolve, reject) => {
+    const proc = spawn('git', ['clone', '--progress', cloneUrl, targetPath], {
+      windowsHide: true,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+
+    let stderr = '';
+    let stdout = '';
+
+    const handleChunk = (chunk) => {
+      const text = chunk.toString();
+      stderr += text;
+
+      for (const line of text.split(/\r|\n/)) {
+        const progress = parseGitCloneProgress(line);
+        if (progress) {
+          onProgress(progress);
+        }
+      }
+    };
+
+    proc.stderr.on('data', handleChunk);
+    proc.stdout.on('data', (chunk) => {
+      stdout += chunk.toString();
+    });
+
+    proc.on('error', reject);
+
+    proc.on('close', (code) => {
+      if (code === 0) {
+        resolve();
+        return;
+      }
+
+      const details = sanitizeCloneOutput(stderr || stdout, pat);
+      reject(new Error(details || 'Git clone failed.'));
+    });
+  });
+}
+
+ipcMain.handle('repos:clone', async (event, { remoteUrl, repoName, targetParent, cloneId }) => {
   try {
     const azure = getActiveWorkspace().azure;
     const { pat } = azure;
@@ -1773,17 +1893,18 @@ ipcMain.handle('repos:clone', async (_event, { remoteUrl, repoName, targetParent
     }
 
     const cloneUrl = buildAuthenticatedCloneUrl(remoteUrl, pat);
-    const result = spawnSync('git', ['clone', cloneUrl, targetPath], {
-      encoding: 'utf8',
-      windowsHide: true,
-      timeout: 10 * 60 * 1000,
-    });
+    const progressChannel = cloneId ? `repos:clone-progress:${cloneId}` : null;
 
-    if (result.status !== 0) {
-      const details = (result.stderr || result.stdout || '').trim();
-      const sanitized = details.replace(new RegExp(pat.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g'), '***');
-      return { ok: false, error: sanitized || 'Git clone failed.' };
-    }
+    const sendProgress = (progress) => {
+      if (!progressChannel || event.sender.isDestroyed()) return;
+      event.sender.send(progressChannel, progress);
+    };
+
+    sendProgress({ phase: 'starting', label: 'Starting clone', percent: 0, indeterminate: false });
+
+    await runGitCloneWithProgress(cloneUrl, targetPath, pat, sendProgress);
+
+    sendProgress({ phase: 'done', label: 'Clone complete', percent: 100, indeterminate: false });
 
     azureRepoCache.clear();
 
