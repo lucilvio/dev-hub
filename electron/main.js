@@ -3,6 +3,7 @@ const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
 const { execSync, spawn, spawnSync } = require('child_process');
+const readline = require('readline');
 const os = require('os');
 const Store = require('electron-store');
 
@@ -1292,11 +1293,43 @@ function gitOutput(repoPath, args) {
     cwd: repoPath,
     encoding: 'utf8',
     stdio: ['pipe', 'pipe', 'pipe'],
+    maxBuffer: 64 * 1024 * 1024,
   });
   if (result.status !== 0) {
     throw new Error(result.stderr?.trim() || result.error?.message || 'git command failed');
   }
   return result.stdout.trim();
+}
+
+function streamGitLines(repoPath, args, onLine) {
+  return new Promise((resolve, reject) => {
+    const proc = spawn('git', args, {
+      cwd: repoPath,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      windowsHide: true,
+    });
+
+    let stderr = '';
+    proc.stderr.on('data', (chunk) => {
+      stderr += chunk.toString();
+    });
+
+    const rl = readline.createInterface({
+      input: proc.stdout,
+      crlfDelay: Infinity,
+    });
+
+    rl.on('line', onLine);
+    proc.on('error', reject);
+    proc.on('close', (code) => {
+      rl.close();
+      if (code === 0) {
+        resolve();
+        return;
+      }
+      reject(new Error(stderr.trim() || `git exited with code ${code}`));
+    });
+  });
 }
 
 function parseTabSeparatedLines(output, fieldCount) {
@@ -1367,90 +1400,49 @@ function formatReportPercent(value, total) {
   return `${((value / total) * 100).toFixed(1)}%`;
 }
 
-function analyzeGitHistory(repoPath) {
-  const logOutput = gitOutput(repoPath, [
-    'log',
-    ...LOCAL_GIT_LOG_ARGS,
-    `--pretty=format:%aN${GIT_FIELD_SEP}%aI${GIT_FIELD_SEP}%s`,
-  ]);
-
-  const commits = [];
-  for (const line of logOutput.split('\n').filter(Boolean)) {
-    const tab1 = line.indexOf(GIT_FIELD_SEP);
-    const tab2 = line.indexOf(GIT_FIELD_SEP, tab1 + 1);
-    if (tab1 === -1 || tab2 === -1) continue;
-
-    const author = line.slice(0, tab1);
-    const isoDate = line.slice(tab1 + 1, tab2);
-    const subject = line.slice(tab2 + 1);
-    const date = new Date(isoDate);
-    commits.push({ author, isoDate, subject, date });
-  }
-
+async function analyzeGitHistory(repoPath) {
   const authorCounts = new Map();
   const dayOfWeekCounts = new Map(DAY_NAMES.map((day) => [day, 0]));
-
-  for (const commit of commits) {
-    authorCounts.set(commit.author, (authorCounts.get(commit.author) || 0) + 1);
-    if (!Number.isNaN(commit.date.getTime())) {
-      const day = DAY_NAMES[commit.date.getDay()];
-      dayOfWeekCounts.set(day, dayOfWeekCounts.get(day) + 1);
-    }
-  }
-
-  const contributors = [...authorCounts.entries()]
-    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
-    .map(([author, count]) => ({ author, count }));
-
-  const validDates = commits
-    .map((commit) => commit.date)
-    .filter((date) => !Number.isNaN(date.getTime()))
-    .sort((a, b) => a - b);
-
-  const totalCommits = commits.length;
-  const firstDate = validDates[0] || null;
-  const lastDate = validDates[validDates.length - 1] || null;
-  const spanDays = firstDate && lastDate
-    ? Math.max(1, Math.ceil((lastDate - firstDate) / (1000 * 60 * 60 * 24)) + 1)
-    : 1;
-
-  const activityRates = {
-    perDay: totalCommits / spanDays,
-    perWeek: (totalCommits / spanDays) * 7,
-    perMonth: (totalCommits / spanDays) * 30.437,
-    spanDays,
-    firstDate: firstDate?.toISOString() || null,
-    lastDate: lastDate?.toISOString() || null,
-  };
-
-  const dayOfWeekActivity = [...dayOfWeekCounts.entries()]
-    .map(([day, count]) => ({ day, count }))
-    .sort((a, b) => b.count - a.count || DAY_NAMES.indexOf(a.day) - DAY_NAMES.indexOf(b.day));
-
   const fileStats = new Map();
+  let totalCommits = 0;
+  let firstDate = null;
+  let lastDate = null;
   let currentIsBugFix = false;
 
-  const numstatOutput = gitOutput(repoPath, [
+  await streamGitLines(repoPath, [
     'log',
     ...LOCAL_GIT_LOG_ARGS,
     '--numstat',
-    `--pretty=format:%H${GIT_FIELD_SEP}%aI${GIT_FIELD_SEP}%s`,
-  ]);
-
-  for (const line of numstatOutput.split('\n')) {
-    if (!line) continue;
+    `--pretty=format:%H${GIT_FIELD_SEP}%aN${GIT_FIELD_SEP}%aI${GIT_FIELD_SEP}%s`,
+  ], (line) => {
+    if (!line) return;
 
     const hashMatch = line.match(/^[0-9a-f]{7,40}\t/);
     if (hashMatch) {
       const tab1 = line.indexOf(GIT_FIELD_SEP);
       const tab2 = line.indexOf(GIT_FIELD_SEP, tab1 + 1);
-      const subject = line.slice(tab2 + 1);
+      const tab3 = line.indexOf(GIT_FIELD_SEP, tab2 + 1);
+      if (tab1 === -1 || tab2 === -1 || tab3 === -1) return;
+
+      const author = line.slice(tab1 + 1, tab2);
+      const isoDate = line.slice(tab2 + 1, tab3);
+      const subject = line.slice(tab3 + 1);
+      const date = new Date(isoDate);
+
+      totalCommits += 1;
+      authorCounts.set(author, (authorCounts.get(author) || 0) + 1);
+      if (!Number.isNaN(date.getTime())) {
+        const day = DAY_NAMES[date.getDay()];
+        dayOfWeekCounts.set(day, dayOfWeekCounts.get(day) + 1);
+        if (!firstDate || date < firstDate) firstDate = date;
+        if (!lastDate || date > lastDate) lastDate = date;
+      }
       currentIsBugFix = BUG_FIX_PATTERN.test(subject);
-      continue;
+      return;
     }
 
     const numstatMatch = line.match(/^(\d+|-)\t(\d+|-)\t(.+)$/);
-    if (!numstatMatch) continue;
+    if (!numstatMatch) return;
 
     const additions = numstatMatch[1] === '-' ? 0 : Number.parseInt(numstatMatch[1], 10);
     const deletions = numstatMatch[2] === '-' ? 0 : Number.parseInt(numstatMatch[2], 10);
@@ -1471,7 +1463,28 @@ function analyzeGitHistory(repoPath) {
     stat.additions += additions;
     stat.deletions += deletions;
     if (currentIsBugFix) stat.fixCommits += 1;
-  }
+  });
+
+  const contributors = [...authorCounts.entries()]
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .map(([author, count]) => ({ author, count }));
+
+  const spanDays = firstDate && lastDate
+    ? Math.max(1, Math.ceil((lastDate - firstDate) / (1000 * 60 * 60 * 24)) + 1)
+    : 1;
+
+  const activityRates = {
+    perDay: totalCommits / spanDays,
+    perWeek: (totalCommits / spanDays) * 7,
+    perMonth: (totalCommits / spanDays) * 30.437,
+    spanDays,
+    firstDate: firstDate?.toISOString() || null,
+    lastDate: lastDate?.toISOString() || null,
+  };
+
+  const dayOfWeekActivity = [...dayOfWeekCounts.entries()]
+    .map(([day, count]) => ({ day, count }))
+    .sort((a, b) => b.count - a.count || DAY_NAMES.indexOf(a.day) - DAY_NAMES.indexOf(b.day));
 
   const fileList = [...fileStats.values()].map((stat) => ({
     ...stat,
@@ -1620,7 +1633,7 @@ function buildGitHistoryReportSummary(analysis) {
   };
 }
 
-function generateGitHistoryReport(repoPath, repoName) {
+async function generateGitHistoryReport(repoPath, repoName) {
   if (!repoPath || !fs.existsSync(repoPath)) {
     throw new Error('Repository folder not found.');
   }
@@ -1628,7 +1641,7 @@ function generateGitHistoryReport(repoPath, repoName) {
     throw new Error('This folder is not a git repository.');
   }
 
-  const analysis = analyzeGitHistory(repoPath);
+  const analysis = await analyzeGitHistory(repoPath);
   const { markdown, generatedAt } = buildGitHistoryReportMarkdown(repoPath, repoName, analysis);
   const reportPath = getGitHistoryReportPath(repoPath);
 
@@ -1648,7 +1661,7 @@ function generateGitHistoryReport(repoPath, repoName) {
   };
 }
 
-function getGitHistoryReportStatus(repoPath) {
+async function getGitHistoryReportStatus(repoPath) {
   const projectData = getProjectData(repoPath);
   const reportPath = projectData.gitHistoryReportPath || getGitHistoryReportPath(repoPath);
   const exists = Boolean(reportPath && fs.existsSync(reportPath));
@@ -1658,7 +1671,7 @@ function getGitHistoryReportStatus(repoPath) {
 
   if (exists && !summary && isGitRepo(repoPath)) {
     try {
-      summary = buildGitHistoryReportSummary(analyzeGitHistory(repoPath));
+      summary = buildGitHistoryReportSummary(await analyzeGitHistory(repoPath));
       projectData.gitHistoryReportSummary = summary;
       projectData.gitHistoryReportPath = reportPath;
       if (!generatedAt) {
@@ -1679,11 +1692,9 @@ function getGitHistoryReportStatus(repoPath) {
   };
 }
 
-const RELEASE_BRANCH_PATTERN = /^(?:release\/|releases\/|release-)/i;
-
-function tryGenerateGitHistoryReport(repoPath, repoName) {
+async function tryGenerateGitHistoryReport(repoPath, repoName) {
   try {
-    const result = generateGitHistoryReport(repoPath, repoName);
+    const result = await generateGitHistoryReport(repoPath, repoName);
     return {
       ok: true,
       generatedAt: result.generatedAt,
@@ -1694,6 +1705,8 @@ function tryGenerateGitHistoryReport(repoPath, repoName) {
     return { ok: false, error: err.message };
   }
 }
+
+const RELEASE_BRANCH_PATTERN = /^(?:release\/|releases\/|release-)/i;
 
 function normalizeReleaseBranchName(ref) {
   return ref.replace(/^origin\//, '');
@@ -1908,7 +1921,7 @@ ipcMain.handle('repos:clone', async (event, { remoteUrl, repoName, targetParent,
 
     azureRepoCache.clear();
 
-    const gitHistoryReport = tryGenerateGitHistoryReport(targetPath, trimmedName);
+    const gitHistoryReport = await tryGenerateGitHistoryReport(targetPath, trimmedName);
 
     return { ok: true, path: targetPath, gitHistoryReport };
   } catch (err) {
@@ -2184,17 +2197,17 @@ ipcMain.handle('repos:mainAheadOfLastRelease', (_event, { repoPath, fetchRemote 
   }
 });
 
-ipcMain.handle('repos:gitHistoryReportStatus', (_event, { repoPath }) => {
+ipcMain.handle('repos:gitHistoryReportStatus', async (_event, { repoPath }) => {
   try {
-    return { ok: true, ...getGitHistoryReportStatus(repoPath) };
+    return { ok: true, ...await getGitHistoryReportStatus(repoPath) };
   } catch (err) {
     return { ok: false, error: err.message };
   }
 });
 
-ipcMain.handle('repos:generateGitHistoryReport', (_event, { repoPath, repoName }) => {
+ipcMain.handle('repos:generateGitHistoryReport', async (_event, { repoPath, repoName }) => {
   try {
-    const result = generateGitHistoryReport(repoPath, repoName || path.basename(repoPath));
+    const result = await generateGitHistoryReport(repoPath, repoName || path.basename(repoPath));
     return { ok: true, ...result };
   } catch (err) {
     return { ok: false, error: err.message };
@@ -2203,7 +2216,7 @@ ipcMain.handle('repos:generateGitHistoryReport', (_event, { repoPath, repoName }
 
 ipcMain.handle('repos:openGitHistoryReport', async (_event, { repoPath }) => {
   try {
-    const status = getGitHistoryReportStatus(repoPath);
+    const status = await getGitHistoryReportStatus(repoPath);
     if (!status.exists || !status.path) {
       return { ok: false, error: 'No git history report found for this project.' };
     }
@@ -2315,7 +2328,7 @@ ipcMain.handle('repos:checkout', (_event, { repoPath, branch }) => {
   }
 });
 
-ipcMain.handle('repos:pull', (_event, { repoPath }) => {
+ipcMain.handle('repos:pull', async (_event, { repoPath }) => {
   try {
     if (!repoPath || !fs.existsSync(repoPath)) {
       return { ok: false, error: 'Repository folder not found.' };
@@ -2344,7 +2357,7 @@ ipcMain.handle('repos:pull', (_event, { repoPath }) => {
     projectData.lastPullAt = lastPullAt;
     setProjectData(repoPath, projectData);
 
-    const gitHistoryReport = tryGenerateGitHistoryReport(
+    const gitHistoryReport = await tryGenerateGitHistoryReport(
       repoPath,
       path.basename(repoPath),
     );
