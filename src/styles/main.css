@@ -1159,6 +1159,42 @@ body {
   color: var(--warning);
 }
 
+.clone-progress {
+  grid-column: 1 / -1;
+  margin-top: 10px;
+}
+
+.clone-progress-track {
+  height: 6px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--text-muted) 18%, transparent);
+  overflow: hidden;
+}
+
+.clone-progress-fill {
+  height: 100%;
+  width: 0;
+  border-radius: inherit;
+  background: linear-gradient(90deg, var(--accent), color-mix(in srgb, var(--accent) 70%, white));
+  transition: width 0.2s ease;
+}
+
+.clone-progress-track.is-indeterminate .clone-progress-fill {
+  width: 35%;
+  animation: clone-progress-indeterminate 1.2s ease-in-out infinite;
+}
+
+@keyframes clone-progress-indeterminate {
+  0% { transform: translateX(-120%); }
+  100% { transform: translateX(320%); }
+}
+
+.clone-progress-label {
+  margin: 6px 0 0;
+  font-size: 0.78rem;
+  color: var(--text-muted);
+}
+
 .remote-repo-item .repo-path {
   font-family: var(--font);
 }
