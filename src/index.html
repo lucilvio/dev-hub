@@ -1,0 +1,344 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https: http:;">
+  <title>Dev Hub</title>
+  <link rel="icon" type="image/svg+xml" href="../assets/icon.svg">
+  <link rel="icon" type="image/png" href="../assets/icon.png">
+  <link rel="stylesheet" href="../node_modules/xterm/css/xterm.css">
+  <link rel="stylesheet" href="styles/main.css">
+</head>
+<body>
+  <header class="titlebar">
+    <div class="titlebar-drag titlebar-drag-left" aria-hidden="true"></div>
+    <div class="command-bar-wrap">
+      <input
+        type="text"
+        id="command-bar"
+        class="command-bar"
+        placeholder="Ctrl+Q — type a command or project…"
+        spellcheck="false"
+        autocomplete="off"
+        aria-label="Command bar"
+        aria-controls="command-results"
+        aria-expanded="false"
+        aria-autocomplete="list"
+        role="combobox"
+      >
+      <ul id="command-results" class="command-results hidden" role="listbox"></ul>
+    </div>
+    <div class="titlebar-drag titlebar-drag-right" aria-hidden="true"></div>
+  </header>
+  <div class="app">
+    <nav class="sidebar">
+      <div class="sidebar-brand">
+        <span class="brand-icon"><img src="../assets/icon.svg" alt="" class="brand-icon-img" width="22" height="22"></span>
+        <span class="brand-text">Dev Hub</span>
+      </div>
+      <div class="workspace-switcher">
+        <label for="workspace-select">Workspace</label>
+        <div class="workspace-switcher-row">
+          <select id="workspace-select"></select>
+          <button type="button" id="workspace-new" class="btn btn-ghost workspace-new-btn" title="New workspace">+</button>
+        </div>
+      </div>
+      <div id="sidebar-user" class="sidebar-user hidden" aria-live="polite">
+        <div class="sidebar-user-avatar" id="sidebar-user-avatar" aria-hidden="true"></div>
+        <div class="sidebar-user-details">
+          <span class="sidebar-user-label">Signed in</span>
+          <span id="workspace-pat-owner" class="sidebar-user-name"></span>
+        </div>
+      </div>
+      <ul class="nav-list nav-list-main">
+        <li><button class="nav-btn active" data-view="dashboard" data-shortcut="d"><span class="nav-icon" aria-hidden="true">◫</span><span><u>D</u>ashboard</span></button></li>
+        <li class="nav-group nav-group-projects" id="nav-projects-group">
+          <button type="button" class="nav-btn nav-btn-parent" id="nav-projects-toggle" data-view="repos" data-shortcut="p" aria-expanded="false">
+            <span class="nav-btn-leading">
+              <span class="nav-icon" aria-hidden="true">▤</span>
+              <span class="nav-btn-label"><u>P</u>rojects</span>
+            </span>
+            <span class="nav-chevron" data-action="toggle-projects" aria-hidden="true">›</span>
+          </button>
+          <ul class="nav-submenu" id="nav-projects-submenu" aria-label="Projects"></ul>
+        </li>
+        <li><button class="nav-btn" data-view="tasks" data-shortcut="t"><span class="nav-icon" aria-hidden="true">☑</span><span><u>T</u>asks</span></button></li>
+        <li><button class="nav-btn" data-view="terminal" data-shortcut="e"><span class="nav-icon nav-icon-terminal" aria-hidden="true">&gt;_</span><span>T<u>e</u>rminal</span></button></li>
+      </ul>
+      <ul class="nav-list nav-list-bottom">
+        <li><button class="nav-btn" data-view="settings" data-shortcut="s"><span class="nav-icon" aria-hidden="true">⚙</span><span><u>S</u>ettings</span></button></li>
+      </ul>
+    </nav>
+
+    <main class="content">
+      <!-- Dashboard -->
+      <section id="view-dashboard" class="view active">
+        <header class="view-header">
+          <div>
+            <h1>Dashboard</h1>
+            <p class="subtitle" id="dash-workspace-name">Your development command center</p>
+            <p class="subtitle dash-user-name hidden" id="dash-user-name"></p>
+          </div>
+          <div class="header-actions">
+            <button type="button" id="dashboard-refresh" class="btn btn-ghost btn-icon refresh-btn" title="Refresh dashboard" aria-label="Refresh dashboard">↻</button>
+          </div>
+        </header>
+        <div class="dashboard-grid">
+          <div class="card stat-card dash-nav-card" data-view="repos" role="link" tabindex="0">
+            <span class="stat-value" id="dash-repo-count">—</span>
+            <span class="stat-label">Projects</span>
+          </div>
+          <div class="card stat-card dash-nav-card" data-view="tasks" role="link" tabindex="0">
+            <span class="stat-value" id="dash-task-count">—</span>
+            <span class="stat-label">Tasks</span>
+          </div>
+          <div class="card stat-card" id="dash-pr-review-card" title="Open pull requests waiting for code review">
+            <span class="stat-value" id="dash-pr-review-count">—</span>
+            <span class="stat-label">PRs awaiting review</span>
+          </div>
+        </div>
+        <div class="dashboard-panels">
+          <div class="card dashboard-projects-card">
+            <h2 class="dash-widget-title" data-view="repos">All Projects</h2>
+            <div id="dash-projects" class="project-cards"></div>
+          </div>
+          <div class="card dashboard-tasks-card">
+            <h2 class="dash-widget-title" data-view="tasks">My Tasks</h2>
+            <ul id="dash-tasks" class="dash-task-list"></ul>
+          </div>
+        </div>
+        <div class="card dashboard-links-card">
+          <div class="dash-widget-header">
+            <h2>Quick Links</h2>
+            <button type="button" id="links-add" class="btn btn-secondary">Add Link</button>
+          </div>
+          <div id="links-grid" class="links-grid"></div>
+        </div>
+      </section>
+
+      <!-- Terminal -->
+      <section id="view-terminal" class="view">
+        <header class="view-header">
+          <h1>Terminal</h1>
+          <div class="header-actions">
+            <button id="terminal-new" class="btn btn-secondary">New Tab</button>
+          </div>
+        </header>
+        <div class="terminal-tabs" id="terminal-tabs"></div>
+        <div id="terminal-container" class="terminal-container"></div>
+      </section>
+
+      <!-- Projects list -->
+      <section id="view-repos" class="view">
+        <header class="view-header">
+          <h1>Projects</h1>
+          <div class="header-actions">
+            <button type="button" id="repos-refresh" class="btn btn-ghost btn-icon refresh-btn" title="Refresh projects" aria-label="Refresh projects">↻</button>
+          </div>
+        </header>
+        <div class="clone-path-panel card">
+          <div class="clone-path-header">
+            <h2>Where to clone repositories</h2>
+            <p class="hint">Remote repos are cloned into this folder. Local projects are discovered here.</p>
+          </div>
+          <div class="clone-path-toolbar">
+            <input type="text" id="clone-path-input" placeholder="C:\Users\you\Projects">
+            <button type="button" id="clone-path-browse" class="btn btn-secondary">Browse…</button>
+          </div>
+          <p id="clone-path-warning" class="field-feedback warning hidden" role="status"></p>
+        </div>
+        <div class="projects-panels">
+          <div class="card projects-panel projects-panel-remote">
+            <div class="projects-panel-header">
+              <div>
+                <h2>Remote repositories</h2>
+                <p class="hint">From Azure DevOps. Clone a repository to create a local project.</p>
+              </div>
+              <button type="button" id="remote-repos-refresh" class="btn btn-ghost btn-icon refresh-btn" title="Refresh remote repositories" aria-label="Refresh remote repositories">↻</button>
+            </div>
+            <p id="remote-repos-status" class="projects-panel-status hidden"></p>
+            <div id="remote-repos-list" class="repos-list repos-list-scroll">
+              <p class="empty-state">Loading remote repositories…</p>
+            </div>
+          </div>
+          <div class="card projects-panel projects-panel-local">
+            <div class="projects-panel-header">
+              <div>
+                <h2>Local projects</h2>
+                <p class="hint">Repositories cloned on this machine.</p>
+              </div>
+            </div>
+            <div id="local-repos-list" class="repos-list">
+              <p class="empty-state">Scanning local repositories…</p>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Project detail -->
+      <section id="view-project" class="view">
+        <header class="view-header project-header">
+          <div class="project-header-main">
+            <button type="button" id="project-back" class="btn btn-ghost project-back-btn">← Back</button>
+            <div>
+              <div class="repo-name-row">
+                <h1 id="project-title">Project</h1>
+              </div>
+              <p class="subtitle" id="project-path"></p>
+            </div>
+          </div>
+          <div class="header-actions" id="project-header-actions"></div>
+        </header>
+        <div class="project-meta-bar card" id="project-meta-bar"></div>
+        <div class="card project-main-release-panel">
+          <h2>Main vs last release</h2>
+          <div id="project-main-release-status" class="main-release-status">
+            <p class="list-empty">Loading…</p>
+          </div>
+        </div>
+        <div class="card project-git-report-panel">
+          <div class="project-panel-header">
+            <h2>Git history report</h2>
+            <div class="project-panel-actions" id="project-git-report-actions"></div>
+          </div>
+          <div id="project-git-report" class="git-history-report">
+            <p class="list-empty">Loading report…</p>
+          </div>
+        </div>
+        <div class="project-grid">
+          <div class="card project-panel">
+            <h2>Recent commits</h2>
+            <ul id="project-commits" class="commit-list"></ul>
+          </div>
+          <div class="card project-panel">
+            <h2>Recent branches</h2>
+            <ul id="project-recent-branches" class="commit-list branch-list"></ul>
+          </div>
+          <div class="card project-panel">
+            <h2>Pull requests</h2>
+            <ul id="project-pull-requests" class="commit-list pr-list"></ul>
+          </div>
+        </div>
+        <div class="card project-readme-panel">
+          <div id="project-readme" class="project-readme-content markdown-body">Loading README…</div>
+        </div>
+      </section>
+
+      <!-- Tasks -->
+      <section id="view-tasks" class="view">
+        <header class="view-header">
+          <h1>Tasks</h1>
+          <div class="header-actions">
+            <button type="button" id="tasks-refresh" class="btn btn-ghost btn-icon refresh-btn" title="Refresh tasks" aria-label="Refresh tasks">↻</button>
+          </div>
+        </header>
+        <div id="tasks-status" class="status-banner hidden"></div>
+        <ul id="tasks-list" class="dash-task-list tasks-page-list"></ul>
+      </section>
+
+      <!-- Settings -->
+      <section id="view-settings" class="view">
+        <header class="view-header">
+          <h1>Settings</h1>
+        </header>
+        <div class="settings-form">
+          <fieldset class="card">
+            <legend>Workspace</legend>
+            <p class="hint">Each workspace has its own repos, Azure DevOps connection, and quick links.</p>
+            <label>
+              Workspace name
+              <input type="text" id="settings-workspace-name" placeholder="My project">
+            </label>
+            <div class="form-actions">
+              <button type="button" id="settings-workspace-rename" class="btn btn-secondary">Rename workspace</button>
+              <button type="button" id="settings-workspace-delete" class="btn btn-secondary">Delete workspace</button>
+              <span id="settings-workspace-status" class="inline-status"></span>
+            </div>
+          </fieldset>
+
+          <fieldset class="card">
+            <legend>Clone location</legend>
+            <p class="hint">Folder where repositories are cloned for this workspace.</p>
+            <div class="clone-path-toolbar">
+              <input type="text" id="settings-clone-path-input" placeholder="C:\Users\you\Projects">
+              <button type="button" id="settings-clone-path-browse" class="btn btn-secondary">Browse…</button>
+            </div>
+            <p id="settings-clone-path-warning" class="field-feedback warning hidden" role="status"></p>
+          </fieldset>
+
+          <fieldset class="card">
+            <legend>Azure DevOps</legend>
+            <label>
+              Organization
+              <input type="text" id="settings-azure-org" placeholder="my-org">
+            </label>
+            <label>
+              Project
+              <input type="text" id="settings-azure-project" placeholder="my-project">
+            </label>
+            <label>
+              Personal Access Token (PAT)
+              <input type="password" id="settings-azure-pat" placeholder="Leave blank to keep existing">
+            </label>
+            <p id="settings-azure-pat-owner" class="settings-pat-owner hidden"></p>
+            <div class="form-actions">
+              <button id="settings-azure-test" class="btn btn-secondary">Test Connection</button>
+              <span id="settings-azure-status" class="inline-status"></span>
+            </div>
+          </fieldset>
+
+          <div class="form-actions">
+            <button id="settings-save" class="btn btn-primary">Save Settings</button>
+            <span id="settings-save-status" class="inline-status"></span>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <div id="link-modal" class="modal-overlay hidden">
+    <div class="modal card">
+      <h2 class="modal-title">Add link</h2>
+      <label>
+        Name
+        <input type="text" id="link-modal-name" placeholder="e.g. Azure DevOps">
+      </label>
+      <label>
+        URL
+        <input type="url" id="link-modal-url" placeholder="https://">
+      </label>
+      <label>
+        Icon <span class="label-hint">(optional emoji)</span>
+        <input type="text" id="link-modal-icon" placeholder="🔗" maxlength="4">
+      </label>
+      <p id="link-modal-error" class="field-feedback error hidden"></p>
+      <div class="form-actions">
+        <button type="button" id="link-modal-cancel" class="btn btn-secondary">Cancel</button>
+        <button type="button" id="link-modal-save" class="btn btn-primary">Add</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="workspace-modal" class="modal-overlay hidden">
+    <div class="modal card">
+      <h2 class="modal-title">New workspace</h2>
+      <label>
+        Name
+        <input type="text" id="workspace-modal-name" placeholder="e.g. Work, Client A">
+      </label>
+      <p id="workspace-modal-error" class="field-feedback error hidden"></p>
+      <div class="form-actions">
+        <button type="button" id="workspace-modal-cancel" class="btn btn-secondary">Cancel</button>
+        <button type="button" id="workspace-modal-create" class="btn btn-primary">Create</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="../node_modules/marked/lib/marked.umd.js"></script>
+  <script src="../node_modules/xterm/lib/xterm.js"></script>
+  <script src="../node_modules/@xterm/addon-fit/lib/addon-fit.js"></script>
+  <script src="../node_modules/@xterm/addon-web-links/lib/addon-web-links.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>

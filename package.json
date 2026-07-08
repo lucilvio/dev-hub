@@ -1,0 +1,31 @@
+{
+  "name": "dev-hub",
+  "version": "1.0.0",
+  "description": "Centralized development routine hub",
+  "main": "electron/main.js",
+  "scripts": {
+    "start": "electron .",
+    "dev": "electron . --dev",
+    "postinstall": "node node_modules/node-pty/scripts/post-install.js"
+  },
+  "keywords": [
+    "electron",
+    "dev-tools"
+  ],
+  "license": "MIT",
+  "devDependencies": {
+    "@electron/rebuild": "^4.1.0",
+    "electron": "^33.2.0"
+  },
+  "dependencies": {
+    "@xterm/addon-fit": "^0.10.0",
+    "@xterm/addon-web-links": "^0.11.0",
+    "electron-store": "^8.2.0",
+    "marked": "^18.0.5",
+    "node-pty": "^1.2.0-beta.12",
+    "xterm": "^5.3.0"
+  },
+  "allowScripts": {
+    "node-pty@1.2.0-beta.12": true
+  }
+}
