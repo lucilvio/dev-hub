@@ -461,9 +461,38 @@ async function renderProjectGitActivity(repoPath, { quiet = false } = {}) {
   }
 }
 
+function appendProjectPullRequestItem(container, pr, { awaitingReview = false } = {}) {
+  const item = document.createElement('li');
+  item.className = `commit-item pr-item${awaitingReview ? ' pr-item-awaiting-review' : ''}`;
+  item.innerHTML = `
+    <div class="commit-header">
+      <span class="commit-hash">#${escapeHtml(String(pr.id))}</span>
+      <span class="commit-date">${escapeHtml(pr.date)}</span>
+    </div>
+    <div class="commit-meta">${escapeHtml(pr.author)}</div>
+    <div class="commit-subject">${escapeHtml(pr.title)}</div>`;
+  item.title = awaitingReview
+    ? 'Pull request awaiting review — open in Azure DevOps'
+    : 'Open pull request in Azure DevOps';
+  item.addEventListener('click', () => api.shell.openExternal(pr.url));
+  container.appendChild(item);
+}
+
+function appendProjectPullRequestSectionHeader(container, label) {
+  const item = document.createElement('li');
+  item.className = 'list-section-header';
+  item.textContent = label;
+  container.appendChild(item);
+}
+
 async function renderProjectPullRequests(repo, { quiet = false } = {}) {
   const prEl = document.getElementById('project-pull-requests');
+  const statusEl = document.getElementById('project-pr-review-status');
   prEl.innerHTML = '<li class="list-empty">Loading pull requests…</li>';
+  if (statusEl) {
+    statusEl.textContent = '';
+    statusEl.className = 'inline-status hidden';
+  }
 
   const result = await api.azure.fetchPullRequests(repo.path);
 
@@ -473,26 +502,40 @@ async function renderProjectPullRequests(repo, { quiet = false } = {}) {
     return;
   }
 
-  if (result.pullRequests.length === 0) {
+  const awaitingReview = result.awaitingReview || [];
+  const pullRequests = result.pullRequests || [];
+
+  if (statusEl) {
+    if (awaitingReview.length > 0) {
+      statusEl.textContent = `${awaitingReview.length} awaiting review`;
+      statusEl.className = 'inline-status warning';
+    } else {
+      statusEl.className = 'inline-status hidden';
+    }
+  }
+
+  if (awaitingReview.length === 0 && pullRequests.length === 0) {
     prEl.innerHTML = '<li class="list-empty">No open pull requests.</li>';
     return;
   }
 
   prEl.innerHTML = '';
-  result.pullRequests.forEach((pr) => {
-    const item = document.createElement('li');
-    item.className = 'commit-item pr-item';
-    item.innerHTML = `
-      <div class="commit-header">
-        <span class="commit-hash">#${escapeHtml(String(pr.id))}</span>
-        <span class="commit-date">${escapeHtml(pr.date)}</span>
-      </div>
-      <div class="commit-meta">${escapeHtml(pr.author)}</div>
-      <div class="commit-subject">${escapeHtml(pr.title)}</div>`;
-    item.title = 'Open pull request in Azure DevOps';
-    item.addEventListener('click', () => api.shell.openExternal(pr.url));
-    prEl.appendChild(item);
-  });
+
+  if (awaitingReview.length > 0) {
+    appendProjectPullRequestSectionHeader(prEl, 'Awaiting review');
+    awaitingReview.forEach((pr) => {
+      appendProjectPullRequestItem(prEl, pr, { awaitingReview: true });
+    });
+  }
+
+  if (pullRequests.length > 0) {
+    if (awaitingReview.length > 0) {
+      appendProjectPullRequestSectionHeader(prEl, 'Recent');
+    }
+    pullRequests.forEach((pr) => {
+      appendProjectPullRequestItem(prEl, pr);
+    });
+  }
 }
 
 function formatGitReportDate(iso) {
@@ -2029,14 +2072,6 @@ async function refreshDashboard() {
   const taskResult = await api.azure.fetchTasks();
   const tasks = taskResult.ok ? taskResult.tasks : [];
   document.getElementById('dash-task-count').textContent = taskResult.ok ? tasks.length : '—';
-
-  const prReviewResult = await api.azure.fetchPullRequestsAwaitingReview();
-  const prReviewCard = document.getElementById('dash-pr-review-card');
-  const prReviewCountEl = document.getElementById('dash-pr-review-count');
-  prReviewCountEl.textContent = prReviewResult.ok ? prReviewResult.count : '—';
-  prReviewCard.title = prReviewResult.ok
-    ? `${prReviewResult.count} open pull request${prReviewResult.count === 1 ? '' : 's'} waiting for code review`
-    : (prReviewResult.error || 'Could not load pull requests awaiting review');
 
   const tasksList = document.getElementById('dash-tasks');
   if (!taskResult.ok) {

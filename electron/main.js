@@ -2414,42 +2414,15 @@ function isPullRequestAwaitingReview(pullRequest) {
   return reviewTargets.some(pendingReview);
 }
 
-async function fetchPullRequestsAwaitingReviewCount() {
-  const azure = getActiveWorkspace().azure;
-  const { organization, project, pat } = azure;
-
-  if (!organization || !project) {
-    throw new Error('Configure Azure DevOps organization and project in Settings.');
-  }
-
-  if (!pat) {
-    throw new Error('Azure DevOps is not configured for this workspace. Add your PAT in Settings.');
-  }
-
-  const repositories = await listAzureGitRepositories(organization, project, pat);
-  const results = await Promise.allSettled(
-    repositories.map((repository) =>
-      fetchActivePullRequestsForRepository(organization, project, repository, pat),
-    ),
-  );
-
-  let count = 0;
-  const errors = [];
-
-  results.forEach((result, index) => {
-    if (result.status === 'rejected') {
-      errors.push(`${repositories[index].name}: ${result.reason.message}`);
-      return;
-    }
-
-    count += result.value.filter(isPullRequestAwaitingReview).length;
-  });
-
-  if (errors.length === repositories.length) {
-    throw new Error(errors[0] || 'Could not load pull requests.');
-  }
-
-  return { count, warnings: errors };
+function mapAzurePullRequest(pr, webBase) {
+  return {
+    id: pr.pullRequestId,
+    title: pr.title || '',
+    author: pr.createdBy?.displayName || 'Unknown',
+    date: formatRelativeTime(pr.creationDate),
+    url: `${webBase}/pullrequest/${pr.pullRequestId}`,
+    awaitingReview: isPullRequestAwaitingReview(pr),
+  };
 }
 
 async function fetchAzurePullRequests(repoPath) {
@@ -2461,36 +2434,26 @@ async function fetchAzurePullRequests(repoPath) {
   }
 
   const { organization, project, repository, repositoryId } = await resolveAzureGitRepository(repoPath);
-  const repoKey = encodeURIComponent(repositoryId || repository);
-  const url = new URL(
-    `https://dev.azure.com/${organization}/${encodeURIComponent(project)}/_apis/git/repositories/${repoKey}/pullrequests`,
+  const activePullRequests = await fetchActivePullRequestsForRepository(
+    organization,
+    project,
+    { id: repositoryId, name: repository },
+    pat,
   );
-  url.searchParams.set('searchCriteria.status', 'active');
-  url.searchParams.set('$top', '5');
-  url.searchParams.set('api-version', '7.0');
-
-  const res = await fetch(url.toString(), {
-    headers: azureAuthHeaders(pat),
-  });
-
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(parseAzureApiError(text, res.status));
-  }
-
-  const data = await res.json();
   const webBase = `https://dev.azure.com/${organization}/${project}/_git/${repository}`;
 
-  return (data.value || [])
-    .sort((a, b) => new Date(b.creationDate) - new Date(a.creationDate))
-    .slice(0, 5)
-    .map((pr) => ({
-      id: pr.pullRequestId,
-      title: pr.title || '',
-      author: pr.createdBy?.displayName || 'Unknown',
-      date: formatRelativeTime(pr.creationDate),
-      url: `${webBase}/pullrequest/${pr.pullRequestId}`,
-    }));
+  const sorted = activePullRequests
+    .sort((a, b) => new Date(b.creationDate) - new Date(a.creationDate));
+
+  const mapped = sorted.map((pr) => mapAzurePullRequest(pr, webBase));
+  const awaitingReview = mapped.filter((pr) => pr.awaitingReview);
+  const pullRequests = mapped.slice(0, 5);
+
+  return {
+    pullRequests,
+    awaitingReview,
+    awaitingReviewCount: awaitingReview.length,
+  };
 }
 
 function isAssignedToCurrentUser(assignedTo, currentUser) {
@@ -2625,22 +2588,13 @@ ipcMain.handle('azure:listRepositories', async () => {
   }
 });
 
-ipcMain.handle('azure:fetchPullRequestsAwaitingReview', async () => {
-  try {
-    const { count, warnings } = await fetchPullRequestsAwaitingReviewCount();
-    return { ok: true, count, warnings };
-  } catch (err) {
-    return { ok: false, error: err.message, count: 0 };
-  }
-});
-
 ipcMain.handle('azure:fetchPullRequests', async (_event, { repoPath }) => {
   try {
     if (!repoPath || !fs.existsSync(repoPath)) {
       return { ok: false, error: 'Repository folder not found.' };
     }
-    const pullRequests = await fetchAzurePullRequests(repoPath);
-    return { ok: true, pullRequests };
+    const data = await fetchAzurePullRequests(repoPath);
+    return { ok: true, ...data };
   } catch (err) {
     return { ok: false, error: err.message };
   }
