@@ -1994,28 +1994,128 @@ ipcMain.handle('repos:clone', async (event, { remoteUrl, repoName, targetParent,
   }
 });
 
+function isPathInsideOrEqual(parentPath, childPath) {
+  const parent = path.resolve(parentPath);
+  const child = path.resolve(childPath);
+  if (parent === child) return true;
+
+  const relative = path.relative(parent, child);
+  return Boolean(relative) && !relative.startsWith('..') && !path.isAbsolute(relative);
+}
+
+function killTerminalsUsingPath(targetPath) {
+  const resolvedTarget = path.resolve(targetPath);
+
+  for (const [id, session] of terminals.entries()) {
+    const sessionCwd = path.resolve(session.cwd || '');
+    if (!isPathInsideOrEqual(resolvedTarget, sessionCwd)) continue;
+
+    try {
+      session.proc.kill();
+    } catch {
+      // Best effort — the folder delete may still succeed.
+    }
+
+    terminals.delete(id);
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send(`terminal:exit:${id}`);
+    }
+  }
+}
+
+function makePathWritableRecursive(targetPath) {
+  let stat;
+  try {
+    stat = fs.lstatSync(targetPath);
+  } catch {
+    return;
+  }
+
+  try {
+    if ((stat.mode & 0o200) === 0) {
+      fs.chmodSync(targetPath, stat.mode | 0o200);
+    }
+  } catch {
+    // Best effort — continue walking/deleting.
+  }
+
+  if (!stat.isDirectory()) return;
+
+  for (const entry of fs.readdirSync(targetPath)) {
+    makePathWritableRecursive(path.join(targetPath, entry));
+  }
+}
+
+function removeDirectoryWindowsFallback(targetPath) {
+  const result = spawnSync('cmd.exe', ['/d', '/s', '/c', 'rd', '/s', '/q', targetPath], {
+    windowsHide: true,
+    encoding: 'utf8',
+  });
+
+  if (result.status === 0 || !fs.existsSync(targetPath)) return;
+
+  const detail = (result.stderr || result.stdout || '').trim();
+  throw new Error(detail || `Windows could not remove the folder (exit code ${result.status}).`);
+}
+
+async function removeDirectoryRecursive(targetPath) {
+  const resolvedPath = path.resolve(String(targetPath || '').trim());
+  if (!fs.existsSync(resolvedPath)) return;
+
+  killTerminalsUsingPath(resolvedPath);
+
+  if (process.platform === 'win32') {
+    makePathWritableRecursive(resolvedPath);
+  }
+
+  try {
+    await fs.promises.rm(resolvedPath, {
+      recursive: true,
+      force: true,
+      maxRetries: 5,
+      retryDelay: 250,
+    });
+  } catch (err) {
+    if (process.platform !== 'win32' || !fs.existsSync(resolvedPath)) {
+      throw err;
+    }
+
+    removeDirectoryWindowsFallback(resolvedPath);
+  }
+}
+
+function formatDeleteProjectError(err) {
+  const message = err?.message || 'Could not delete the project folder.';
+  if (process.platform !== 'win32' || !/EPERM|EBUSY|access/i.test(message)) {
+    return message;
+  }
+
+  return `${message}\n\nClose any terminals, editors, or apps using this folder, then try again.`;
+}
+
 ipcMain.handle('repos:delete', async (_event, { repoPath }) => {
   try {
-    if (!repoPath || !fs.existsSync(repoPath)) {
+    const resolvedPath = path.resolve(String(repoPath || '').trim());
+    if (!resolvedPath || !fs.existsSync(resolvedPath)) {
       return { ok: false, error: 'Project folder not found.' };
     }
 
     const clonePath = getActiveWorkspace().clonePath || '';
-    if (!isRepoWithinClonePath(repoPath, clonePath)) {
+    if (!isRepoWithinClonePath(resolvedPath, clonePath)) {
       return { ok: false, error: 'This project is outside the configured clone folder.' };
     }
 
-    if (!isGitRepo(repoPath)) {
+    if (!isGitRepo(resolvedPath)) {
       return { ok: false, error: 'This folder is not a git repository.' };
     }
 
-    fs.rmSync(repoPath, { recursive: true, force: true, maxRetries: 3, retryDelay: 200 });
-    deleteProjectData(repoPath);
-    azureRepoCache.delete(path.normalize(repoPath));
+    await removeDirectoryRecursive(resolvedPath);
+    deleteProjectData(resolvedPath);
+    azureRepoCache.delete(path.normalize(resolvedPath));
 
     return { ok: true };
   } catch (err) {
-    return { ok: false, error: err.message };
+    return { ok: false, error: formatDeleteProjectError(err) };
   }
 });
 
