@@ -59,6 +59,7 @@ contextBridge.exposeInMainWorld('devHub', {
 
   repos: {
     scan: () => ipcRenderer.invoke('repos:scan'),
+    scanReleaseWarnings: (repoPaths) => ipcRenderer.invoke('repos:scanReleaseWarnings', { repoPaths }),
     clone: (opts) => ipcRenderer.invoke('repos:clone', opts),
     onCloneProgress: (cloneId, callback) => {
       const channel = `repos:clone-progress:${cloneId}`;
@@ -100,7 +101,7 @@ contextBridge.exposeInMainWorld('devHub', {
   },
 
   azure: {
-    listRepositories: () => ipcRenderer.invoke('azure:listRepositories'),
+    listRepositories: (localRepos) => ipcRenderer.invoke('azure:listRepositories', { localRepos }),
     fetchTasks: () => ipcRenderer.invoke('azure:fetchTasks'),
     fetchPullRequests: (repoPath) => ipcRenderer.invoke('azure:fetchPullRequests', { repoPath }),
     fetchPullRequestsAwaitingReview: () => ipcRenderer.invoke('azure:fetchPullRequestsAwaitingReview'),

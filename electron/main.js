@@ -327,6 +327,8 @@ ipcMain.handle('settings:save', (_event, settings) => {
   }
   if (settings.azure !== undefined) {
     updates.azure = settings.azure;
+    invalidateAzureRepoListCache();
+    azureRepoCache.clear();
   }
 
   updateActiveWorkspace(updates);
@@ -854,7 +856,7 @@ function scanForRepos(rootPath, maxDepth = 3) {
     }
 
     if (isGitRepo(currentPath)) {
-      repos.push(getRepoInfo(currentPath));
+      repos.push(getRepoScanInfo(currentPath));
       return;
     }
 
@@ -1122,6 +1124,31 @@ function buildAuthenticatedCloneUrl(remoteUrl, pat) {
 }
 
 const azureRepoCache = new Map();
+const azureRepoListCache = new Map();
+
+function getAzureRepoListCacheKey(organization, project) {
+  return `${organization}/${project}`.toLowerCase();
+}
+
+async function listAzureGitRepositoriesCached(organization, project, pat, maxAgeMs = 60_000) {
+  const key = getAzureRepoListCacheKey(organization, project);
+  const cached = azureRepoListCache.get(key);
+  if (cached && Date.now() - cached.fetchedAt < maxAgeMs) {
+    return cached.repos;
+  }
+
+  const repos = await listAzureGitRepositories(organization, project, pat);
+  azureRepoListCache.set(key, { fetchedAt: Date.now(), repos });
+  return repos;
+}
+
+function invalidateAzureRepoListCache(organization, project) {
+  if (organization && project) {
+    azureRepoListCache.delete(getAzureRepoListCacheKey(organization, project));
+    return;
+  }
+  azureRepoListCache.clear();
+}
 
 async function resolveAzureGitRepository(repoPath) {
   const cacheKey = path.normalize(repoPath);
@@ -1145,7 +1172,7 @@ async function resolveAzureGitRepository(repoPath) {
   }
 
   const { organization, project } = parsed;
-  const repositories = await listAzureGitRepositories(organization, project, pat);
+  const repositories = await listAzureGitRepositoriesCached(organization, project, pat);
 
   if (repositories.length === 0) {
     throw new Error(`No Git repositories found in project "${project}".`);
@@ -1243,7 +1270,19 @@ function formatRelativeTime(iso) {
   return rtf.format(Math.round(diffSec / (86400 * 365)), 'year');
 }
 
-function getRepoInfo(repoPath) {
+function isRepoDirty(repoPath) {
+  try {
+    execSync('git diff-index --quiet HEAD --', {
+      cwd: repoPath,
+      stdio: 'ignore',
+    });
+    return false;
+  } catch {
+    return true;
+  }
+}
+
+function getRepoScanInfo(repoPath) {
   const azure = getActiveWorkspace().azure;
   const info = {
     name: path.basename(repoPath),
@@ -1258,13 +1297,7 @@ function getRepoInfo(repoPath) {
 
   try {
     info.branch = getCurrentBranch(repoPath);
-
-    const status = execSync('git status --porcelain', {
-      cwd: repoPath,
-      encoding: 'utf8',
-      stdio: ['pipe', 'pipe', 'pipe'],
-    }).trim();
-    info.dirty = status.length > 0;
+    info.dirty = isRepoDirty(repoPath);
 
     try {
       info.remote = sanitizeGitRemoteUrl(getRepoOriginRemote(repoPath));
@@ -1279,7 +1312,17 @@ function getRepoInfo(repoPath) {
       encoding: 'utf8',
       stdio: ['pipe', 'pipe', 'pipe'],
     }).trim();
+  } catch {
+    // repo may be in a broken state
+  }
 
+  return info;
+}
+
+function getRepoInfo(repoPath) {
+  const info = getRepoScanInfo(repoPath);
+
+  try {
     info.lastReleaseBranch = findLastReleaseBranch(repoPath);
   } catch {
     // repo may be in a broken state
@@ -1669,21 +1712,6 @@ async function getGitHistoryReportStatus(repoPath) {
   let summary = exists ? (projectData.gitHistoryReportSummary || null) : null;
   let generatedAt = exists ? (projectData.gitHistoryReportAt || null) : null;
 
-  if (exists && !summary && isGitRepo(repoPath)) {
-    try {
-      summary = buildGitHistoryReportSummary(await analyzeGitHistory(repoPath));
-      projectData.gitHistoryReportSummary = summary;
-      projectData.gitHistoryReportPath = reportPath;
-      if (!generatedAt) {
-        generatedAt = fs.statSync(reportPath).mtime.toISOString();
-        projectData.gitHistoryReportAt = generatedAt;
-      }
-      setProjectData(repoPath, projectData);
-    } catch {
-      // Report file exists but history could not be analyzed.
-    }
-  }
-
   return {
     exists,
     generatedAt: exists ? generatedAt : null,
@@ -1749,9 +1777,47 @@ function getProjectWarningCount(repoPath) {
 ipcMain.handle('repos:scan', () => {
   return scanAllWorkspaceRepos().map((repo) => ({
     ...repo,
-    warningCount: getProjectWarningCount(repo.path),
+    warningCount: null,
     project: projectSummary(getProjectData(repo.path)),
   }));
+});
+
+async function mapWithConcurrency(items, concurrency, mapper) {
+  const results = new Array(items.length);
+  let index = 0;
+
+  async function worker() {
+    while (index < items.length) {
+      const currentIndex = index;
+      index += 1;
+      results[currentIndex] = await mapper(items[currentIndex], currentIndex);
+    }
+  }
+
+  await Promise.all(
+    Array.from({ length: Math.min(concurrency, items.length) }, () => worker()),
+  );
+  return results;
+}
+
+ipcMain.handle('repos:scanReleaseWarnings', async (_event, { repoPaths } = {}) => {
+  try {
+    const paths = Array.isArray(repoPaths) && repoPaths.length > 0
+      ? repoPaths
+      : scanAllWorkspaceRepos().map((repo) => repo.path);
+
+    const warnings = await mapWithConcurrency(paths, 2, async (repoPath) => {
+      try {
+        return { repoPath, warningCount: getProjectWarningCount(repoPath) };
+      } catch {
+        return { repoPath, warningCount: 0 };
+      }
+    });
+
+    return { ok: true, warnings };
+  } catch (err) {
+    return { ok: false, error: err.message, warnings: [] };
+  }
 });
 
 function parseGitCloneProgress(line) {
@@ -1920,10 +1986,9 @@ ipcMain.handle('repos:clone', async (event, { remoteUrl, repoName, targetParent,
     sendProgress({ phase: 'done', label: 'Clone complete', percent: 100, indeterminate: false });
 
     azureRepoCache.clear();
+    invalidateAzureRepoListCache(getActiveWorkspace().azure.organization, getActiveWorkspace().azure.project);
 
-    const gitHistoryReport = await tryGenerateGitHistoryReport(targetPath, trimmedName);
-
-    return { ok: true, path: targetPath, gitHistoryReport };
+    return { ok: true, path: targetPath, gitHistoryReport: null };
   } catch (err) {
     return { ok: false, error: err.message };
   }
@@ -2355,12 +2420,9 @@ ipcMain.handle('repos:pull', async (_event, { repoPath }) => {
     const lastPullAt = new Date().toISOString();
     const projectData = getProjectData(repoPath);
     projectData.lastPullAt = lastPullAt;
+    projectData.gitHistoryReportSummary = null;
+    projectData.gitHistoryReportAt = null;
     setProjectData(repoPath, projectData);
-
-    const gitHistoryReport = await tryGenerateGitHistoryReport(
-      repoPath,
-      path.basename(repoPath),
-    );
 
     return {
       ok: true,
@@ -2368,7 +2430,7 @@ ipcMain.handle('repos:pull', async (_event, { repoPath }) => {
       lastPullAt,
       repo: getRepoInfo(repoPath),
       branches: listRepoBranches(repoPath, false),
-      gitHistoryReport,
+      gitHistoryReport: null,
     };
   } catch (err) {
     return { ok: false, error: err.message };
@@ -2426,7 +2488,16 @@ async function fetchPullRequestsAwaitingReviewCount() {
     throw new Error('Azure DevOps is not configured for this workspace. Add your PAT in Settings.');
   }
 
-  const repositories = await listAzureGitRepositories(organization, project, pat);
+  const azureRepos = await listAzureGitRepositoriesCached(organization, project, pat);
+  const localRepos = scanAllWorkspaceRepos();
+  const repositories = azureRepos.filter((azureRepo) =>
+    Boolean(findLocalRepoForAzureRepository(azureRepo, localRepos)),
+  );
+
+  if (repositories.length === 0) {
+    return { count: 0, warnings: [] };
+  }
+
   const results = await Promise.allSettled(
     repositories.map((repository) =>
       fetchActivePullRequestsForRepository(organization, project, repository, pat),
@@ -2577,7 +2648,7 @@ async function fetchAzureTasks() {
   });
 }
 
-ipcMain.handle('azure:listRepositories', async () => {
+ipcMain.handle('azure:listRepositories', async (_event, { localRepos } = {}) => {
   try {
     const azure = getActiveWorkspace().azure;
     const { organization, project, pat } = azure;
@@ -2598,11 +2669,13 @@ ipcMain.handle('azure:listRepositories', async () => {
       };
     }
 
-    const azureRepos = await listAzureGitRepositories(organization, project, pat);
-    const localRepos = scanAllWorkspaceRepos();
+    const azureRepos = await listAzureGitRepositoriesCached(organization, project, pat);
+    const scannedLocalRepos = Array.isArray(localRepos) && localRepos.length > 0
+      ? localRepos
+      : scanAllWorkspaceRepos();
 
     const repositories = azureRepos.map((repo) => {
-      const local = findLocalRepoForAzureRepository(repo, localRepos);
+      const local = findLocalRepoForAzureRepository(repo, scannedLocalRepos);
       return {
         id: repo.id,
         name: repo.name,
