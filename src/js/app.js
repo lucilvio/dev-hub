@@ -380,7 +380,7 @@ async function renderProjectGitActivity(repoPath, { quiet = false } = {}) {
   const [commitsResult, branchesResult, releaseStatusResult] = await Promise.all([
     api.repos.recentCommits(repoPath),
     api.repos.recentBranches(repoPath),
-    api.repos.mainAheadOfLastRelease(repoPath),
+    api.repos.mainAheadOfLastRelease(repoPath, false),
   ]);
 
   if (!commitsResult.ok) {
@@ -549,19 +549,27 @@ function buildGitHistoryReportStatsHtml(summary) {
 function renderGitHistoryReportActions(repo, actionsEl, status) {
   actionsEl.innerHTML = '';
 
-  if (!status.exists) return;
+  if (status.exists) {
+    const openBtn = document.createElement('button');
+    openBtn.type = 'button';
+    openBtn.className = 'btn btn-secondary';
+    openBtn.textContent = 'Open report';
+    openBtn.addEventListener('click', () => openGitHistoryReport(repo));
+    actionsEl.appendChild(openBtn);
+    return;
+  }
 
-  const openBtn = document.createElement('button');
-  openBtn.type = 'button';
-  openBtn.className = 'btn btn-secondary';
-  openBtn.textContent = 'Open report';
-  openBtn.addEventListener('click', () => openGitHistoryReport(repo));
-  actionsEl.appendChild(openBtn);
+  const generateBtn = document.createElement('button');
+  generateBtn.type = 'button';
+  generateBtn.className = 'btn btn-secondary';
+  generateBtn.textContent = 'Generate report';
+  generateBtn.addEventListener('click', () => regenerateGitHistoryReportForProject(repo));
+  actionsEl.appendChild(generateBtn);
 }
 
 function renderGitHistoryReportContent(reportEl, status) {
   if (!status.exists) {
-    reportEl.innerHTML = '<p class="list-empty">Analyzing git history…</p>';
+    reportEl.innerHTML = '<p class="list-empty">No git history report yet. Generate one to analyze contributors, activity, and changed files.</p>';
     return;
   }
 
@@ -644,7 +652,7 @@ async function renderProjectGitHistoryReport(repo, { quiet = false } = {}) {
     return;
   }
 
-  await regenerateGitHistoryReportForProject(repo, { quiet });
+  updateGitHistoryReportWidget(repo, status);
 }
 
 async function renderProjectReadme(repoPath, { quiet = false } = {}) {
@@ -1700,13 +1708,13 @@ async function cloneRemoteRepository(remoteRepo, buttonEl) {
   }
 }
 
-async function loadRemoteRepos() {
+async function loadRemoteRepos(localRepos = null) {
   const listEl = document.getElementById('remote-repos-list');
   listEl.innerHTML = '<p class="empty-state">Loading remote repositories…</p>';
   setRemoteReposStatus('');
 
   try {
-    const result = await api.azure.listRepositories();
+    const result = await api.azure.listRepositories(localRepos);
 
     if (!result.ok) {
       listEl.innerHTML = `<p class="empty-state">${escapeHtml(result.error)}</p>`;
@@ -1746,6 +1754,7 @@ async function loadLocalProjects() {
     const repos = await api.repos.scan();
     renderProjectsSubmenu(repos);
     renderLocalProjectsList(repos);
+    enrichRepoReleaseWarnings(repos);
     return repos;
   } catch (err) {
     listEl.innerHTML = '<p class="empty-state">Could not scan local repositories.</p>';
@@ -1755,7 +1764,8 @@ async function loadLocalProjects() {
 }
 
 async function loadProjectsPage() {
-  await Promise.all([loadRemoteRepos(), loadLocalProjects()]);
+  const repos = await loadLocalProjects();
+  await loadRemoteRepos(repos);
 }
 
 async function loadRepos() {
@@ -2008,23 +2018,68 @@ function createDashboardProjectsEmptyState() {
   return guide;
 }
 
+function applyRepoReleaseWarnings(repos, warnings) {
+  const warningByPath = new Map(
+    (warnings || []).map((entry) => [entry.repoPath, entry.warningCount]),
+  );
+
+  return repos.map((repo) => ({
+    ...repo,
+    warningCount: warningByPath.has(repo.path)
+      ? warningByPath.get(repo.path)
+      : (repo.warningCount ?? 0),
+  }));
+}
+
+function renderDashboardProjectCards(repos) {
+  const projectsGrid = document.getElementById('dash-projects');
+  if (!projectsGrid) return;
+
+  projectsGrid.innerHTML = '';
+
+  if (repos.length === 0) {
+    projectsGrid.appendChild(createDashboardProjectsEmptyState());
+    return;
+  }
+
+  repos.forEach((repo) => {
+    projectsGrid.appendChild(createProjectCard(repo, repo.project || {}));
+  });
+}
+
+async function enrichRepoReleaseWarnings(repos) {
+  if (!repos.length) return repos;
+
+  try {
+    const result = await api.repos.scanReleaseWarnings(repos.map((repo) => repo.path));
+    if (!result.ok) return repos;
+
+    const enriched = applyRepoReleaseWarnings(repos, result.warnings);
+    cachedRepos = enriched;
+    renderProjectsSubmenu(enriched);
+
+    if (document.getElementById('view-repos')?.classList.contains('active')) {
+      renderLocalProjectsList(enriched);
+    }
+
+    if (document.getElementById('view-dashboard')?.classList.contains('active')) {
+      renderDashboardProjectCards(enriched);
+    }
+
+    return enriched;
+  } catch {
+    return repos;
+  }
+}
+
 async function refreshDashboard() {
   const repos = await api.repos.scan();
   cachedRepos = repos;
   renderProjectsSubmenu(repos);
 
   document.getElementById('dash-repo-count').textContent = repos.length;
-
-  const projectsGrid = document.getElementById('dash-projects');
-  projectsGrid.innerHTML = '';
-
-  if (repos.length === 0) {
-    projectsGrid.appendChild(createDashboardProjectsEmptyState());
-  } else {
-    repos.forEach((repo) => {
-      projectsGrid.appendChild(createProjectCard(repo, repo.project || {}));
-    });
-  }
+  renderDashboardProjectCards(repos);
+  enrichRepoReleaseWarnings(repos);
 
   const taskResult = await api.azure.fetchTasks();
   const tasks = taskResult.ok ? taskResult.tasks : [];
@@ -2123,21 +2178,16 @@ async function pullProjectRepo(repo, button, lastPullEl, branchSelect, branchSta
     }
 
     const repos = await api.repos.scan();
-    const updatedRepo = repos.find((r) => r.path === repo.path) || result.repo;
+    const updatedRepo = result.repo || repos.find((r) => r.path === repo.path) || repo;
     currentProject = updatedRepo;
     cachedRepos = repos;
     renderProjectsSubmenu(repos);
+    enrichRepoReleaseWarnings(repos);
 
     await renderProjectGitActivity(repo.path, { quiet: true });
     await renderProjectPullRequests(updatedRepo, { quiet: true });
     await renderProjectReadme(repo.path, { quiet: true });
-
-    const reportStatus = gitHistoryReportStatusFromResult(result.gitHistoryReport);
-    if (reportStatus) {
-      updateGitHistoryReportWidget(updatedRepo, reportStatus);
-    } else {
-      await regenerateGitHistoryReportForProject(updatedRepo, { quiet: true });
-    }
+    await renderProjectGitHistoryReport(updatedRepo, { quiet: true });
 
     const remoteUrl = document.querySelector('.project-remote-url');
     if (remoteUrl && updatedRepo.remote) {
@@ -2157,8 +2207,6 @@ async function pullProjectRepo(repo, button, lastPullEl, branchSelect, branchSta
         releaseEl.classList.add('empty');
       }
     }
-
-    await refreshDashboard();
   } catch (err) {
     await reportError(err, 'Git pull failed');
   } finally {
