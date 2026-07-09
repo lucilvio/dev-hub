@@ -752,9 +752,10 @@ body {
 
 .dashboard-grid {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 280px));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 16px;
   margin-bottom: 24px;
+  flex-shrink: 0;
 }
 
 .stat-card {
@@ -808,14 +809,18 @@ body {
 }
 
 .dashboard-panels {
-  display: flex;
-  flex-direction: column;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.35fr);
   gap: 16px;
   margin-bottom: 16px;
+  align-items: start;
+  flex: 1;
+  min-height: 0;
 }
 
 .dashboard-links-card {
   margin-top: 0;
+  flex-shrink: 0;
 }
 
 .dash-widget-header {
@@ -1634,12 +1639,47 @@ input:focus, textarea:focus {
   gap: 6px;
 }
 
-.dashboard-projects-card {
-  min-width: 0;
+.dashboard-projects-card .project-cards {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
 }
 
+.dashboard-projects-card .project-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 14px;
+}
+
+.dashboard-projects-card .project-card:hover {
+  transform: none;
+}
+
+.dashboard-projects-card .project-card-name {
+  margin-bottom: 0;
+  flex: 1 1 auto;
+}
+
+.dashboard-projects-card .project-card-name-text {
+  white-space: normal;
+  overflow: visible;
+  text-overflow: clip;
+}
+
+.dashboard-projects-card .project-card-meta {
+  flex-shrink: 0;
+}
+
+.dashboard-projects-card,
 .dashboard-tasks-card {
   min-width: 0;
+  min-height: 0;
+}
+
+.dashboard-tasks-card .dash-task-list {
+  min-height: 0;
 }
 
 .dashboard-tasks-card .dash-task-row {
@@ -2186,6 +2226,12 @@ input:focus, textarea:focus {
   font-style: italic;
   font-size: 0.88rem;
   padding: 8px 0;
+}
+
+@media (max-width: 1100px) {
+  .dashboard-panels {
+    grid-template-columns: 1fr;
+  }
 }
 
 @media (max-width: 900px) {
