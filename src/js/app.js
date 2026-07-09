@@ -32,6 +32,9 @@ let settings = null;
 let workspaces = { activeId: null, workspaces: [] };
 let currentProject = null;
 let cachedRepos = [];
+let repoScanFetchedAt = 0;
+let repoScanRequestId = 0;
+const REPO_SCAN_CACHE_MS = 30_000;
 let lastListView = 'dashboard';
 let terminalSessions = [];
 let activeTerminalId = null;
@@ -149,15 +152,15 @@ function showView(name, { focusContent = false } = {}) {
   }
 
   if (name === 'dashboard') {
-    refreshDashboard();
+    void refreshDashboard({ preferCache: true });
   }
 
   if (name === 'repos') {
-    loadProjectsPage();
+    void loadProjectsPage({ preferCache: true });
   }
 
   if (name === 'tasks') {
-    loadTasks();
+    void loadTasks();
   }
 
   if (focusContent) {
@@ -380,7 +383,7 @@ async function renderProjectGitActivity(repoPath, { quiet = false } = {}) {
   const [commitsResult, branchesResult, releaseStatusResult] = await Promise.all([
     api.repos.recentCommits(repoPath),
     api.repos.recentBranches(repoPath),
-    api.repos.mainAheadOfLastRelease(repoPath),
+    api.repos.mainAheadOfLastRelease(repoPath, false),
   ]);
 
   if (!commitsResult.ok) {
@@ -854,23 +857,105 @@ function renderAzurePatOwnerInSettings() {
   ownerEl.classList.add('hidden');
 }
 
+function invalidateRepoCache() {
+  repoScanFetchedAt = 0;
+}
+
+function applyRepoReleaseWarnings(repos, warnings) {
+  const warningByPath = new Map(
+    (warnings || []).map((entry) => [entry.repoPath, entry.warningCount]),
+  );
+
+  return repos.map((repo) => ({
+    ...repo,
+    warningCount: warningByPath.has(repo.path)
+      ? warningByPath.get(repo.path)
+      : (repo.warningCount ?? 0),
+  }));
+}
+
+async function enrichRepoReleaseWarnings(repos, requestId = repoScanRequestId) {
+  if (!repos.length || requestId !== repoScanRequestId) return repos;
+
+  try {
+    const result = await api.repos.scanReleaseWarnings(repos.map((repo) => repo.path));
+    if (!result.ok || requestId !== repoScanRequestId) return repos;
+
+    const enriched = applyRepoReleaseWarnings(repos, result.warnings);
+    cachedRepos = enriched;
+    repoScanFetchedAt = Date.now();
+    renderProjectsSubmenu(enriched);
+
+    if (document.getElementById('view-repos')?.classList.contains('active')) {
+      renderLocalProjectsList(enriched);
+    }
+
+    if (document.getElementById('view-dashboard')?.classList.contains('active')) {
+      renderDashboardProjectCards(enriched);
+    }
+
+    return enriched;
+  } catch {
+    return repos;
+  }
+}
+
+async function fetchRepos({ force = false } = {}) {
+  const hasFreshCache = !force
+    && cachedRepos.length > 0
+    && Date.now() - repoScanFetchedAt < REPO_SCAN_CACHE_MS;
+
+  if (hasFreshCache) {
+    return cachedRepos;
+  }
+
+  const requestId = ++repoScanRequestId;
+  const repos = await api.repos.scan();
+  if (requestId !== repoScanRequestId) {
+    return cachedRepos;
+  }
+
+  cachedRepos = repos;
+  repoScanFetchedAt = Date.now();
+  renderProjectsSubmenu(repos);
+  void enrichRepoReleaseWarnings(repos, requestId);
+  return repos;
+}
+
+function renderDashboardProjectCards(repos) {
+  const projectsGrid = document.getElementById('dash-projects');
+  if (!projectsGrid) return;
+
+  projectsGrid.innerHTML = '';
+
+  if (repos.length === 0) {
+    projectsGrid.appendChild(createDashboardProjectsEmptyState());
+    return;
+  }
+
+  repos.forEach((repo) => {
+    projectsGrid.appendChild(createProjectCard(repo, repo.project || {}));
+  });
+}
+
 async function onWorkspaceChanged() {
   try {
     currentProject = null;
+    invalidateRepoCache();
     await loadSettings();
     await loadWorkspaces();
     renderWorkspaceSwitcher();
     renderSettingsForm();
     renderLinks();
     renderClonePathFields();
-    await refreshDashboard();
+    await refreshDashboard({ force: true });
 
     if (document.getElementById('view-project').classList.contains('active')) {
       showView('dashboard');
     }
 
     if (document.getElementById('view-repos').classList.contains('active')) {
-      await loadProjectsPage();
+      await loadProjectsPage({ force: true });
     }
     if (document.getElementById('view-tasks').classList.contains('active')) {
       await loadTasks();
@@ -1142,14 +1227,14 @@ async function saveClonePath(folderPath) {
   try {
     await api.settings.save({ clonePath: trimmed });
     await loadSettings();
+    invalidateRepoCache();
     renderClonePathFields();
     syncDefaultTerminalsToClonePath();
 
     if (document.getElementById('view-repos').classList.contains('active')) {
-      await loadProjectsPage();
+      await loadProjectsPage({ force: true });
     } else {
-      const repos = await api.repos.scan();
-      renderProjectsSubmenu(repos);
+      await fetchRepos({ force: true });
     }
     return true;
   } catch (err) {
@@ -1516,8 +1601,9 @@ async function deleteLocalProject(repo) {
       showView('repos');
     }
 
-    await loadProjectsPage();
-    await refreshDashboard();
+    invalidateRepoCache();
+    await loadProjectsPage({ force: true });
+    await refreshDashboard({ force: true });
   } catch (err) {
     await reportError(err, 'Delete project');
   }
@@ -1699,8 +1785,9 @@ async function cloneRemoteRepository(remoteRepo, buttonEl) {
     }
 
     setRemoteReposStatus(`Cloned "${remoteRepo.name}" to ${result.path}`, 'ok');
-    await loadProjectsPage();
-    const repos = await api.repos.scan();
+    invalidateRepoCache();
+    await loadProjectsPage({ force: true });
+    const repos = await fetchRepos({ force: true });
     const cloned = repos.find((repo) => repo.path === result.path);
     if (cloned) {
       openProject(cloned);
@@ -1716,13 +1803,13 @@ async function cloneRemoteRepository(remoteRepo, buttonEl) {
   }
 }
 
-async function loadRemoteRepos() {
+async function loadRemoteRepos(localRepos = null) {
   const listEl = document.getElementById('remote-repos-list');
   listEl.innerHTML = '<p class="empty-state">Loading remote repositories…</p>';
   setRemoteReposStatus('');
 
   try {
-    const result = await api.azure.listRepositories();
+    const result = await api.azure.listRepositories(localRepos);
 
     if (!result.ok) {
       listEl.innerHTML = `<p class="empty-state">${escapeHtml(result.error)}</p>`;
@@ -1754,13 +1841,12 @@ async function loadRemoteRepos() {
   }
 }
 
-async function loadLocalProjects() {
+async function loadLocalProjects({ force = false } = {}) {
   const listEl = document.getElementById('local-repos-list');
   listEl.innerHTML = '<p class="empty-state">Scanning local repositories…</p>';
 
   try {
-    const repos = await api.repos.scan();
-    renderProjectsSubmenu(repos);
+    const repos = await fetchRepos({ force });
     renderLocalProjectsList(repos);
     return repos;
   } catch (err) {
@@ -1770,8 +1856,19 @@ async function loadLocalProjects() {
   }
 }
 
-async function loadProjectsPage() {
-  await Promise.all([loadRemoteRepos(), loadLocalProjects()]);
+async function loadProjectsPage({ preferCache = false, force = false } = {}) {
+  if (preferCache && cachedRepos.length > 0 && !force) {
+    renderLocalProjectsList(cachedRepos);
+    void loadRemoteRepos(cachedRepos);
+    void fetchRepos({ force }).then((repos) => {
+      renderLocalProjectsList(repos);
+      loadRemoteRepos(repos);
+    });
+    return;
+  }
+
+  const repos = await loadLocalProjects({ force });
+  await loadRemoteRepos(repos);
 }
 
 async function loadRepos() {
@@ -1793,7 +1890,7 @@ async function runRefreshButton(button, task) {
 }
 
 document.getElementById('repos-refresh').addEventListener('click', (e) => {
-  runRefreshButton(e.currentTarget, loadProjectsPage);
+  runRefreshButton(e.currentTarget, () => loadProjectsPage({ force: true }));
 });
 
 document.getElementById('remote-repos-refresh').addEventListener('click', (e) => {
@@ -2024,23 +2121,17 @@ function createDashboardProjectsEmptyState() {
   return guide;
 }
 
-async function refreshDashboard() {
-  const repos = await api.repos.scan();
-  cachedRepos = repos;
-  renderProjectsSubmenu(repos);
-
-  document.getElementById('dash-repo-count').textContent = repos.length;
-
-  const projectsGrid = document.getElementById('dash-projects');
-  projectsGrid.innerHTML = '';
-
-  if (repos.length === 0) {
-    projectsGrid.appendChild(createDashboardProjectsEmptyState());
-  } else {
-    repos.forEach((repo) => {
-      projectsGrid.appendChild(createProjectCard(repo, repo.project || {}));
-    });
+async function refreshDashboard({ preferCache = false, force = false } = {}) {
+  if (preferCache && cachedRepos.length > 0 && !force) {
+    document.getElementById('dash-repo-count').textContent = cachedRepos.length;
+    renderDashboardProjectCards(cachedRepos);
+    void refreshDashboard({ force });
+    return;
   }
+
+  const repos = await fetchRepos({ force });
+  document.getElementById('dash-repo-count').textContent = repos.length;
+  renderDashboardProjectCards(repos);
 
   const taskResult = await api.azure.fetchTasks();
   const tasks = taskResult.ok ? taskResult.tasks : [];
@@ -2059,7 +2150,7 @@ async function refreshDashboard() {
 }
 
 document.getElementById('dashboard-refresh').addEventListener('click', (e) => {
-  runRefreshButton(e.currentTarget, refreshDashboard);
+  runRefreshButton(e.currentTarget, () => refreshDashboard({ force: true }));
 });
 
 // ── Helpers ─────────────────────────────────────────────────────────────────────
@@ -2130,11 +2221,10 @@ async function pullProjectRepo(repo, button, lastPullEl, branchSelect, branchSta
       branchState.current = result.repo?.branch || branchState.current;
     }
 
-    const repos = await api.repos.scan();
+    invalidateRepoCache();
+    const repos = await fetchRepos({ force: true });
     const updatedRepo = repos.find((r) => r.path === repo.path) || result.repo;
     currentProject = updatedRepo;
-    cachedRepos = repos;
-    renderProjectsSubmenu(repos);
 
     await renderProjectGitActivity(repo.path, { quiet: true });
     await renderProjectPullRequests(updatedRepo, { quiet: true });
@@ -2166,7 +2256,7 @@ async function pullProjectRepo(repo, button, lastPullEl, branchSelect, branchSta
       }
     }
 
-    await refreshDashboard();
+    void refreshDashboard({ preferCache: true });
   } catch (err) {
     await reportError(err, 'Git pull failed');
   } finally {
@@ -2349,15 +2439,14 @@ async function createProjectMetaWidget(repo, projectData, renderContext = {}) {
         }
       }
 
-      const repos = await api.repos.scan();
-      cachedRepos = repos;
-      renderProjectsSubmenu(repos);
+      invalidateRepoCache();
+      await fetchRepos({ force: true });
 
       await Promise.all([
         renderProjectGitActivity(repo.path, { quiet: true }),
         renderProjectPullRequests(updatedRepo, { quiet: true }),
       ]);
-      await refreshDashboard();
+      void refreshDashboard({ preferCache: true });
     } catch (err) {
       branchSelect.disabled = false;
       branchSelect.value = previousBranch;
@@ -2590,13 +2679,13 @@ function getGlobalCommandCatalog() {
       id: 'refresh-dashboard',
       label: 'Refresh dashboard',
       keywords: ['refresh', 'reload', 'dashboard', 'pull requests', 'prs'],
-      run: () => refreshDashboard(),
+      run: () => refreshDashboard({ force: true }),
     },
     {
       id: 'refresh-projects',
       label: 'Refresh projects page',
       keywords: ['refresh', 'projects', 'repos', 'reload', 'remote', 'local', 'clone'],
-      run: () => loadProjectsPage(),
+      run: () => loadProjectsPage({ force: true }),
     },
     {
       id: 'refresh-tasks',

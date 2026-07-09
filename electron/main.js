@@ -854,7 +854,7 @@ function scanForRepos(rootPath, maxDepth = 3) {
     }
 
     if (isGitRepo(currentPath)) {
-      repos.push(getRepoInfo(currentPath));
+      repos.push(getRepoScanInfo(currentPath));
       return;
     }
 
@@ -1243,7 +1243,19 @@ function formatRelativeTime(iso) {
   return rtf.format(Math.round(diffSec / (86400 * 365)), 'year');
 }
 
-function getRepoInfo(repoPath) {
+function isRepoDirty(repoPath) {
+  try {
+    execSync('git diff-index --quiet HEAD --', {
+      cwd: repoPath,
+      stdio: 'ignore',
+    });
+    return false;
+  } catch {
+    return true;
+  }
+}
+
+function getRepoScanInfo(repoPath) {
   const azure = getActiveWorkspace().azure;
   const info = {
     name: path.basename(repoPath),
@@ -1258,13 +1270,7 @@ function getRepoInfo(repoPath) {
 
   try {
     info.branch = getCurrentBranch(repoPath);
-
-    const status = execSync('git status --porcelain', {
-      cwd: repoPath,
-      encoding: 'utf8',
-      stdio: ['pipe', 'pipe', 'pipe'],
-    }).trim();
-    info.dirty = status.length > 0;
+    info.dirty = isRepoDirty(repoPath);
 
     try {
       info.remote = sanitizeGitRemoteUrl(getRepoOriginRemote(repoPath));
@@ -1279,7 +1285,17 @@ function getRepoInfo(repoPath) {
       encoding: 'utf8',
       stdio: ['pipe', 'pipe', 'pipe'],
     }).trim();
+  } catch {
+    // repo may be in a broken state
+  }
 
+  return info;
+}
+
+function getRepoInfo(repoPath) {
+  const info = getRepoScanInfo(repoPath);
+
+  try {
     info.lastReleaseBranch = findLastReleaseBranch(repoPath);
   } catch {
     // repo may be in a broken state
@@ -1749,9 +1765,47 @@ function getProjectWarningCount(repoPath) {
 ipcMain.handle('repos:scan', () => {
   return scanAllWorkspaceRepos().map((repo) => ({
     ...repo,
-    warningCount: getProjectWarningCount(repo.path),
+    warningCount: null,
     project: projectSummary(getProjectData(repo.path)),
   }));
+});
+
+async function mapWithConcurrency(items, concurrency, mapper) {
+  const results = new Array(items.length);
+  let index = 0;
+
+  async function worker() {
+    while (index < items.length) {
+      const currentIndex = index;
+      index += 1;
+      results[currentIndex] = await mapper(items[currentIndex], currentIndex);
+    }
+  }
+
+  await Promise.all(
+    Array.from({ length: Math.min(concurrency, items.length) }, () => worker()),
+  );
+  return results;
+}
+
+ipcMain.handle('repos:scanReleaseWarnings', async (_event, { repoPaths } = {}) => {
+  try {
+    const paths = Array.isArray(repoPaths) && repoPaths.length > 0
+      ? repoPaths
+      : scanAllWorkspaceRepos().map((repo) => repo.path);
+
+    const warnings = await mapWithConcurrency(paths, 2, async (repoPath) => {
+      try {
+        return { repoPath, warningCount: getProjectWarningCount(repoPath) };
+      } catch {
+        return { repoPath, warningCount: 0 };
+      }
+    });
+
+    return { ok: true, warnings };
+  } catch (err) {
+    return { ok: false, error: err.message, warnings: [] };
+  }
 });
 
 function parseGitCloneProgress(line) {
@@ -2538,7 +2592,7 @@ async function fetchAzureTasks() {
   });
 }
 
-ipcMain.handle('azure:listRepositories', async () => {
+ipcMain.handle('azure:listRepositories', async (_event, { localRepos } = {}) => {
   try {
     const azure = getActiveWorkspace().azure;
     const { organization, project, pat } = azure;
@@ -2560,10 +2614,12 @@ ipcMain.handle('azure:listRepositories', async () => {
     }
 
     const azureRepos = await listAzureGitRepositories(organization, project, pat);
-    const localRepos = scanAllWorkspaceRepos();
+    const scannedLocalRepos = Array.isArray(localRepos) && localRepos.length > 0
+      ? localRepos
+      : scanAllWorkspaceRepos();
 
     const repositories = azureRepos.map((repo) => {
-      const local = findLocalRepoForAzureRepository(repo, localRepos);
+      const local = findLocalRepoForAzureRepository(repo, scannedLocalRepos);
       return {
         id: repo.id,
         name: repo.name,
