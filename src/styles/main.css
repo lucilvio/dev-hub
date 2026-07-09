@@ -752,7 +752,7 @@ body {
 
 .dashboard-grid {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  grid-template-columns: repeat(2, minmax(0, 280px));
   gap: 16px;
   margin-bottom: 24px;
 }
@@ -808,8 +808,8 @@ body {
 }
 
 .dashboard-panels {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
+  display: flex;
+  flex-direction: column;
   gap: 16px;
   margin-bottom: 16px;
 }
@@ -1575,7 +1575,7 @@ input:focus, textarea:focus {
 
 .project-cards {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
   gap: 12px;
 }
 
@@ -1586,6 +1586,7 @@ input:focus, textarea:focus {
   border-radius: var(--radius);
   cursor: pointer;
   transition: border-color 0.15s, transform 0.15s;
+  min-width: 0;
 }
 
 .project-card:hover {
@@ -1600,6 +1601,14 @@ input:focus, textarea:focus {
   display: flex;
   align-items: center;
   gap: 8px;
+  min-width: 0;
+}
+
+.project-card-name-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .project-card-warning {
@@ -1626,11 +1635,11 @@ input:focus, textarea:focus {
 }
 
 .dashboard-projects-card {
-  grid-column: 1 / -1;
+  min-width: 0;
 }
 
 .dashboard-tasks-card {
-  grid-column: 1 / -1;
+  min-width: 0;
 }
 
 .dashboard-tasks-card .dash-task-row {
@@ -2181,7 +2190,7 @@ input:focus, textarea:focus {
 
 @media (max-width: 900px) {
   .dashboard-grid {
-    grid-template-columns: repeat(2, 1fr);
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .project-grid {

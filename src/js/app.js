@@ -724,7 +724,11 @@ function createProjectCard(repo, summary = {}) {
 
   const nameEl = document.createElement('div');
   nameEl.className = 'project-card-name';
-  nameEl.textContent = repo.name;
+
+  const nameText = document.createElement('span');
+  nameText.className = 'project-card-name-text';
+  nameText.textContent = repo.name;
+  nameEl.appendChild(nameText);
 
   if ((repo.warningCount || 0) > 1) {
     const warnDot = document.createElement('span');
