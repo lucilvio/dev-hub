@@ -752,7 +752,7 @@ body {
 
 .dashboard-grid {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  grid-template-columns: repeat(2, 1fr);
   gap: 16px;
   margin-bottom: 24px;
 }
@@ -2106,6 +2106,10 @@ input:focus, textarea:focus {
 .pr-item {
   cursor: pointer;
   transition: border-color 0.15s ease, background 0.15s ease;
+}
+
+.pr-item-awaiting-review {
+  border-left: 3px solid var(--warning);
 }
 
 .pr-item:hover {

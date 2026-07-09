@@ -32,6 +32,9 @@ let settings = null;
 let workspaces = { activeId: null, workspaces: [] };
 let currentProject = null;
 let cachedRepos = [];
+let repoScanFetchedAt = 0;
+let repoScanRequestId = 0;
+const REPO_SCAN_CACHE_MS = 30_000;
 let lastListView = 'dashboard';
 let terminalSessions = [];
 let activeTerminalId = null;
@@ -149,15 +152,15 @@ function showView(name, { focusContent = false } = {}) {
   }
 
   if (name === 'dashboard') {
-    refreshDashboard();
+    void refreshDashboard({ preferCache: true });
   }
 
   if (name === 'repos') {
-    loadProjectsPage();
+    void loadProjectsPage({ preferCache: true });
   }
 
   if (name === 'tasks') {
-    loadTasks();
+    void loadTasks();
   }
 
   if (focusContent) {
@@ -461,37 +464,53 @@ async function renderProjectGitActivity(repoPath, { quiet = false } = {}) {
   }
 }
 
+function appendProjectPullRequestItem(container, pr) {
+  const item = document.createElement('li');
+  item.className = 'commit-item pr-item pr-item-awaiting-review';
+  item.innerHTML = `
+    <div class="commit-header">
+      <span class="commit-hash">#${escapeHtml(String(pr.id))}</span>
+      <span class="commit-date">${escapeHtml(pr.date)}</span>
+    </div>
+    <div class="commit-meta">${escapeHtml(pr.author)}</div>
+    <div class="commit-subject">${escapeHtml(pr.title)}</div>`;
+  item.title = 'Pull request awaiting review — open in Azure DevOps';
+  item.addEventListener('click', () => api.shell.openExternal(pr.url));
+  container.appendChild(item);
+}
+
 async function renderProjectPullRequests(repo, { quiet = false } = {}) {
   const prEl = document.getElementById('project-pull-requests');
+  const statusEl = document.getElementById('project-pr-review-status');
   prEl.innerHTML = '<li class="list-empty">Loading pull requests…</li>';
+  if (statusEl) {
+    statusEl.textContent = '';
+    statusEl.className = 'inline-status hidden';
+  }
 
   const result = await api.azure.fetchPullRequests(repo.path);
 
   if (!result.ok) {
     prEl.innerHTML = '<li class="list-empty">Could not load pull requests.</li>';
-    if (!quiet) await reportError(result.error, 'Pull requests');
+    if (!quiet) await reportError(result.error, 'Pull requests awaiting review');
     return;
   }
 
-  if (result.pullRequests.length === 0) {
-    prEl.innerHTML = '<li class="list-empty">No open pull requests.</li>';
+  const awaitingReview = result.awaitingReview || [];
+
+  if (statusEl && awaitingReview.length > 0) {
+    statusEl.textContent = `${awaitingReview.length} open`;
+    statusEl.className = 'inline-status warning';
+  }
+
+  if (awaitingReview.length === 0) {
+    prEl.innerHTML = '<li class="list-empty">No pull requests awaiting review.</li>';
     return;
   }
 
   prEl.innerHTML = '';
-  result.pullRequests.forEach((pr) => {
-    const item = document.createElement('li');
-    item.className = 'commit-item pr-item';
-    item.innerHTML = `
-      <div class="commit-header">
-        <span class="commit-hash">#${escapeHtml(String(pr.id))}</span>
-        <span class="commit-date">${escapeHtml(pr.date)}</span>
-      </div>
-      <div class="commit-meta">${escapeHtml(pr.author)}</div>
-      <div class="commit-subject">${escapeHtml(pr.title)}</div>`;
-    item.title = 'Open pull request in Azure DevOps';
-    item.addEventListener('click', () => api.shell.openExternal(pr.url));
-    prEl.appendChild(item);
+  awaitingReview.forEach((pr) => {
+    appendProjectPullRequestItem(prEl, pr);
   });
 }
 
@@ -846,23 +865,105 @@ function renderAzurePatOwnerInSettings() {
   ownerEl.classList.add('hidden');
 }
 
+function invalidateRepoCache() {
+  repoScanFetchedAt = 0;
+}
+
+function applyRepoReleaseWarnings(repos, warnings) {
+  const warningByPath = new Map(
+    (warnings || []).map((entry) => [entry.repoPath, entry.warningCount]),
+  );
+
+  return repos.map((repo) => ({
+    ...repo,
+    warningCount: warningByPath.has(repo.path)
+      ? warningByPath.get(repo.path)
+      : (repo.warningCount ?? 0),
+  }));
+}
+
+async function enrichRepoReleaseWarnings(repos, requestId = repoScanRequestId) {
+  if (!repos.length || requestId !== repoScanRequestId) return repos;
+
+  try {
+    const result = await api.repos.scanReleaseWarnings(repos.map((repo) => repo.path));
+    if (!result.ok || requestId !== repoScanRequestId) return repos;
+
+    const enriched = applyRepoReleaseWarnings(repos, result.warnings);
+    cachedRepos = enriched;
+    repoScanFetchedAt = Date.now();
+    renderProjectsSubmenu(enriched);
+
+    if (document.getElementById('view-repos')?.classList.contains('active')) {
+      renderLocalProjectsList(enriched);
+    }
+
+    if (document.getElementById('view-dashboard')?.classList.contains('active')) {
+      renderDashboardProjectCards(enriched);
+    }
+
+    return enriched;
+  } catch {
+    return repos;
+  }
+}
+
+async function fetchRepos({ force = false } = {}) {
+  const hasFreshCache = !force
+    && cachedRepos.length > 0
+    && Date.now() - repoScanFetchedAt < REPO_SCAN_CACHE_MS;
+
+  if (hasFreshCache) {
+    return cachedRepos;
+  }
+
+  const requestId = ++repoScanRequestId;
+  const repos = await api.repos.scan();
+  if (requestId !== repoScanRequestId) {
+    return cachedRepos;
+  }
+
+  cachedRepos = repos;
+  repoScanFetchedAt = Date.now();
+  renderProjectsSubmenu(repos);
+  void enrichRepoReleaseWarnings(repos, requestId);
+  return repos;
+}
+
+function renderDashboardProjectCards(repos) {
+  const projectsGrid = document.getElementById('dash-projects');
+  if (!projectsGrid) return;
+
+  projectsGrid.innerHTML = '';
+
+  if (repos.length === 0) {
+    projectsGrid.appendChild(createDashboardProjectsEmptyState());
+    return;
+  }
+
+  repos.forEach((repo) => {
+    projectsGrid.appendChild(createProjectCard(repo, repo.project || {}));
+  });
+}
+
 async function onWorkspaceChanged() {
   try {
     currentProject = null;
+    invalidateRepoCache();
     await loadSettings();
     await loadWorkspaces();
     renderWorkspaceSwitcher();
     renderSettingsForm();
     renderLinks();
     renderClonePathFields();
-    await refreshDashboard();
+    await refreshDashboard({ force: true });
 
     if (document.getElementById('view-project').classList.contains('active')) {
       showView('dashboard');
     }
 
     if (document.getElementById('view-repos').classList.contains('active')) {
-      await loadProjectsPage();
+      await loadProjectsPage({ force: true });
     }
     if (document.getElementById('view-tasks').classList.contains('active')) {
       await loadTasks();
@@ -1134,14 +1235,14 @@ async function saveClonePath(folderPath) {
   try {
     await api.settings.save({ clonePath: trimmed });
     await loadSettings();
+    invalidateRepoCache();
     renderClonePathFields();
     syncDefaultTerminalsToClonePath();
 
     if (document.getElementById('view-repos').classList.contains('active')) {
-      await loadProjectsPage();
+      await loadProjectsPage({ force: true });
     } else {
-      const repos = await api.repos.scan();
-      renderProjectsSubmenu(repos);
+      await fetchRepos({ force: true });
     }
     return true;
   } catch (err) {
@@ -1508,8 +1609,9 @@ async function deleteLocalProject(repo) {
       showView('repos');
     }
 
-    await loadProjectsPage();
-    await refreshDashboard();
+    invalidateRepoCache();
+    await loadProjectsPage({ force: true });
+    await refreshDashboard({ force: true });
   } catch (err) {
     await reportError(err, 'Delete project');
   }
@@ -1691,8 +1793,9 @@ async function cloneRemoteRepository(remoteRepo, buttonEl) {
     }
 
     setRemoteReposStatus(`Cloned "${remoteRepo.name}" to ${result.path}`, 'ok');
-    await loadProjectsPage();
-    const repos = await api.repos.scan();
+    invalidateRepoCache();
+    await loadProjectsPage({ force: true });
+    const repos = await fetchRepos({ force: true });
     const cloned = repos.find((repo) => repo.path === result.path);
     if (cloned) {
       openProject(cloned);
@@ -1746,15 +1849,13 @@ async function loadRemoteRepos(localRepos = null) {
   }
 }
 
-async function loadLocalProjects() {
+async function loadLocalProjects({ force = false } = {}) {
   const listEl = document.getElementById('local-repos-list');
   listEl.innerHTML = '<p class="empty-state">Scanning local repositories…</p>';
 
   try {
-    const repos = await api.repos.scan();
-    renderProjectsSubmenu(repos);
+    const repos = await fetchRepos({ force });
     renderLocalProjectsList(repos);
-    enrichRepoReleaseWarnings(repos);
     return repos;
   } catch (err) {
     listEl.innerHTML = '<p class="empty-state">Could not scan local repositories.</p>';
@@ -1763,8 +1864,18 @@ async function loadLocalProjects() {
   }
 }
 
-async function loadProjectsPage() {
-  const repos = await loadLocalProjects();
+async function loadProjectsPage({ preferCache = false, force = false } = {}) {
+  if (preferCache && cachedRepos.length > 0 && !force) {
+    renderLocalProjectsList(cachedRepos);
+    void loadRemoteRepos(cachedRepos);
+    void fetchRepos({ force }).then((repos) => {
+      renderLocalProjectsList(repos);
+      loadRemoteRepos(repos);
+    });
+    return;
+  }
+
+  const repos = await loadLocalProjects({ force });
   await loadRemoteRepos(repos);
 }
 
@@ -1787,7 +1898,7 @@ async function runRefreshButton(button, task) {
 }
 
 document.getElementById('repos-refresh').addEventListener('click', (e) => {
-  runRefreshButton(e.currentTarget, loadProjectsPage);
+  runRefreshButton(e.currentTarget, () => loadProjectsPage({ force: true }));
 });
 
 document.getElementById('remote-repos-refresh').addEventListener('click', (e) => {
@@ -2018,80 +2129,21 @@ function createDashboardProjectsEmptyState() {
   return guide;
 }
 
-function applyRepoReleaseWarnings(repos, warnings) {
-  const warningByPath = new Map(
-    (warnings || []).map((entry) => [entry.repoPath, entry.warningCount]),
-  );
-
-  return repos.map((repo) => ({
-    ...repo,
-    warningCount: warningByPath.has(repo.path)
-      ? warningByPath.get(repo.path)
-      : (repo.warningCount ?? 0),
-  }));
-}
-
-function renderDashboardProjectCards(repos) {
-  const projectsGrid = document.getElementById('dash-projects');
-  if (!projectsGrid) return;
-
-  projectsGrid.innerHTML = '';
-
-  if (repos.length === 0) {
-    projectsGrid.appendChild(createDashboardProjectsEmptyState());
+async function refreshDashboard({ preferCache = false, force = false } = {}) {
+  if (preferCache && cachedRepos.length > 0 && !force) {
+    document.getElementById('dash-repo-count').textContent = cachedRepos.length;
+    renderDashboardProjectCards(cachedRepos);
+    void refreshDashboard({ force });
     return;
   }
 
-  repos.forEach((repo) => {
-    projectsGrid.appendChild(createProjectCard(repo, repo.project || {}));
-  });
-}
-
-async function enrichRepoReleaseWarnings(repos) {
-  if (!repos.length) return repos;
-
-  try {
-    const result = await api.repos.scanReleaseWarnings(repos.map((repo) => repo.path));
-    if (!result.ok) return repos;
-
-    const enriched = applyRepoReleaseWarnings(repos, result.warnings);
-    cachedRepos = enriched;
-    renderProjectsSubmenu(enriched);
-
-    if (document.getElementById('view-repos')?.classList.contains('active')) {
-      renderLocalProjectsList(enriched);
-    }
-
-    if (document.getElementById('view-dashboard')?.classList.contains('active')) {
-      renderDashboardProjectCards(enriched);
-    }
-
-    return enriched;
-  } catch {
-    return repos;
-  }
-}
-
-async function refreshDashboard() {
-  const repos = await api.repos.scan();
-  cachedRepos = repos;
-  renderProjectsSubmenu(repos);
-
+  const repos = await fetchRepos({ force });
   document.getElementById('dash-repo-count').textContent = repos.length;
   renderDashboardProjectCards(repos);
-  enrichRepoReleaseWarnings(repos);
 
   const taskResult = await api.azure.fetchTasks();
   const tasks = taskResult.ok ? taskResult.tasks : [];
   document.getElementById('dash-task-count').textContent = taskResult.ok ? tasks.length : '—';
-
-  const prReviewResult = await api.azure.fetchPullRequestsAwaitingReview();
-  const prReviewCard = document.getElementById('dash-pr-review-card');
-  const prReviewCountEl = document.getElementById('dash-pr-review-count');
-  prReviewCountEl.textContent = prReviewResult.ok ? prReviewResult.count : '—';
-  prReviewCard.title = prReviewResult.ok
-    ? `${prReviewResult.count} open pull request${prReviewResult.count === 1 ? '' : 's'} waiting for code review`
-    : (prReviewResult.error || 'Could not load pull requests awaiting review');
 
   const tasksList = document.getElementById('dash-tasks');
   if (!taskResult.ok) {
@@ -2106,7 +2158,7 @@ async function refreshDashboard() {
 }
 
 document.getElementById('dashboard-refresh').addEventListener('click', (e) => {
-  runRefreshButton(e.currentTarget, refreshDashboard);
+  runRefreshButton(e.currentTarget, () => refreshDashboard({ force: true }));
 });
 
 // ── Helpers ─────────────────────────────────────────────────────────────────────
@@ -2177,12 +2229,10 @@ async function pullProjectRepo(repo, button, lastPullEl, branchSelect, branchSta
       branchState.current = result.repo?.branch || branchState.current;
     }
 
-    const repos = await api.repos.scan();
-    const updatedRepo = result.repo || repos.find((r) => r.path === repo.path) || repo;
+    invalidateRepoCache();
+    const repos = await fetchRepos({ force: true });
+    const updatedRepo = repos.find((r) => r.path === repo.path) || result.repo;
     currentProject = updatedRepo;
-    cachedRepos = repos;
-    renderProjectsSubmenu(repos);
-    enrichRepoReleaseWarnings(repos);
 
     await renderProjectGitActivity(repo.path, { quiet: true });
     await renderProjectPullRequests(updatedRepo, { quiet: true });
@@ -2207,6 +2257,7 @@ async function pullProjectRepo(repo, button, lastPullEl, branchSelect, branchSta
         releaseEl.classList.add('empty');
       }
     }
+    void refreshDashboard({ preferCache: true });
   } catch (err) {
     await reportError(err, 'Git pull failed');
   } finally {
@@ -2389,15 +2440,14 @@ async function createProjectMetaWidget(repo, projectData, renderContext = {}) {
         }
       }
 
-      const repos = await api.repos.scan();
-      cachedRepos = repos;
-      renderProjectsSubmenu(repos);
+      invalidateRepoCache();
+      await fetchRepos({ force: true });
 
       await Promise.all([
         renderProjectGitActivity(repo.path, { quiet: true }),
         renderProjectPullRequests(updatedRepo, { quiet: true }),
       ]);
-      await refreshDashboard();
+      void refreshDashboard({ preferCache: true });
     } catch (err) {
       branchSelect.disabled = false;
       branchSelect.value = previousBranch;
@@ -2630,13 +2680,13 @@ function getGlobalCommandCatalog() {
       id: 'refresh-dashboard',
       label: 'Refresh dashboard',
       keywords: ['refresh', 'reload', 'dashboard', 'pull requests', 'prs'],
-      run: () => refreshDashboard(),
+      run: () => refreshDashboard({ force: true }),
     },
     {
       id: 'refresh-projects',
       label: 'Refresh projects page',
       keywords: ['refresh', 'projects', 'repos', 'reload', 'remote', 'local', 'clone'],
-      run: () => loadProjectsPage(),
+      run: () => loadProjectsPage({ force: true }),
     },
     {
       id: 'refresh-tasks',

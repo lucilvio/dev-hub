@@ -93,10 +93,6 @@
             <span class="stat-value" id="dash-task-count">—</span>
             <span class="stat-label">Tasks</span>
           </div>
-          <div class="card stat-card" id="dash-pr-review-card" title="Open pull requests waiting for code review">
-            <span class="stat-value" id="dash-pr-review-count">—</span>
-            <span class="stat-label">PRs awaiting review</span>
-          </div>
         </div>
         <div class="dashboard-panels">
           <div class="card dashboard-projects-card">
@@ -216,7 +212,10 @@
             <ul id="project-recent-branches" class="commit-list branch-list"></ul>
           </div>
           <div class="card project-panel">
-            <h2>Pull requests</h2>
+            <div class="project-panel-header">
+              <h2>PRs awaiting review</h2>
+              <span id="project-pr-review-status" class="inline-status hidden"></span>
+            </div>
             <ul id="project-pull-requests" class="commit-list pr-list"></ul>
           </div>
         </div>

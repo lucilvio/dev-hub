@@ -104,7 +104,6 @@ contextBridge.exposeInMainWorld('devHub', {
     listRepositories: (localRepos) => ipcRenderer.invoke('azure:listRepositories', { localRepos }),
     fetchTasks: () => ipcRenderer.invoke('azure:fetchTasks'),
     fetchPullRequests: (repoPath) => ipcRenderer.invoke('azure:fetchPullRequests', { repoPath }),
-    fetchPullRequestsAwaitingReview: () => ipcRenderer.invoke('azure:fetchPullRequestsAwaitingReview'),
     testConnection: () => ipcRenderer.invoke('azure:testConnection'),
   },
 });
