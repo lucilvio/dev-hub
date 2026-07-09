@@ -2112,16 +2112,6 @@ input:focus, textarea:focus {
   border-left: 3px solid var(--warning);
 }
 
-.list-section-header {
-  padding: 10px 0 6px;
-  font-size: 0.78rem;
-  font-weight: 600;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-  color: var(--text-muted);
-  list-style: none;
-}
-
 .pr-item:hover {
   border-color: var(--accent);
   background: color-mix(in srgb, var(--accent) 6%, var(--bg));

@@ -461,9 +461,9 @@ async function renderProjectGitActivity(repoPath, { quiet = false } = {}) {
   }
 }
 
-function appendProjectPullRequestItem(container, pr, { awaitingReview = false } = {}) {
+function appendProjectPullRequestItem(container, pr) {
   const item = document.createElement('li');
-  item.className = `commit-item pr-item${awaitingReview ? ' pr-item-awaiting-review' : ''}`;
+  item.className = 'commit-item pr-item pr-item-awaiting-review';
   item.innerHTML = `
     <div class="commit-header">
       <span class="commit-hash">#${escapeHtml(String(pr.id))}</span>
@@ -471,17 +471,8 @@ function appendProjectPullRequestItem(container, pr, { awaitingReview = false } 
     </div>
     <div class="commit-meta">${escapeHtml(pr.author)}</div>
     <div class="commit-subject">${escapeHtml(pr.title)}</div>`;
-  item.title = awaitingReview
-    ? 'Pull request awaiting review — open in Azure DevOps'
-    : 'Open pull request in Azure DevOps';
+  item.title = 'Pull request awaiting review — open in Azure DevOps';
   item.addEventListener('click', () => api.shell.openExternal(pr.url));
-  container.appendChild(item);
-}
-
-function appendProjectPullRequestSectionHeader(container, label) {
-  const item = document.createElement('li');
-  item.className = 'list-section-header';
-  item.textContent = label;
   container.appendChild(item);
 }
 
@@ -498,44 +489,26 @@ async function renderProjectPullRequests(repo, { quiet = false } = {}) {
 
   if (!result.ok) {
     prEl.innerHTML = '<li class="list-empty">Could not load pull requests.</li>';
-    if (!quiet) await reportError(result.error, 'Pull requests');
+    if (!quiet) await reportError(result.error, 'Pull requests awaiting review');
     return;
   }
 
   const awaitingReview = result.awaitingReview || [];
-  const pullRequests = result.pullRequests || [];
 
-  if (statusEl) {
-    if (awaitingReview.length > 0) {
-      statusEl.textContent = `${awaitingReview.length} awaiting review`;
-      statusEl.className = 'inline-status warning';
-    } else {
-      statusEl.className = 'inline-status hidden';
-    }
+  if (statusEl && awaitingReview.length > 0) {
+    statusEl.textContent = `${awaitingReview.length} open`;
+    statusEl.className = 'inline-status warning';
   }
 
-  if (awaitingReview.length === 0 && pullRequests.length === 0) {
-    prEl.innerHTML = '<li class="list-empty">No open pull requests.</li>';
+  if (awaitingReview.length === 0) {
+    prEl.innerHTML = '<li class="list-empty">No pull requests awaiting review.</li>';
     return;
   }
 
   prEl.innerHTML = '';
-
-  if (awaitingReview.length > 0) {
-    appendProjectPullRequestSectionHeader(prEl, 'Awaiting review');
-    awaitingReview.forEach((pr) => {
-      appendProjectPullRequestItem(prEl, pr, { awaitingReview: true });
-    });
-  }
-
-  if (pullRequests.length > 0) {
-    if (awaitingReview.length > 0) {
-      appendProjectPullRequestSectionHeader(prEl, 'Recent');
-    }
-    pullRequests.forEach((pr) => {
-      appendProjectPullRequestItem(prEl, pr);
-    });
-  }
+  awaitingReview.forEach((pr) => {
+    appendProjectPullRequestItem(prEl, pr);
+  });
 }
 
 function formatGitReportDate(iso) {

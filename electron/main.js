@@ -2447,10 +2447,8 @@ async function fetchAzurePullRequests(repoPath) {
 
   const mapped = sorted.map((pr) => mapAzurePullRequest(pr, webBase));
   const awaitingReview = mapped.filter((pr) => pr.awaitingReview);
-  const pullRequests = mapped.slice(0, 5);
 
   return {
-    pullRequests,
     awaitingReview,
     awaitingReviewCount: awaitingReview.length,
   };
