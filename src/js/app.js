@@ -568,19 +568,27 @@ function buildGitHistoryReportStatsHtml(summary) {
 function renderGitHistoryReportActions(repo, actionsEl, status) {
   actionsEl.innerHTML = '';
 
-  if (!status.exists) return;
+  if (status.exists) {
+    const openBtn = document.createElement('button');
+    openBtn.type = 'button';
+    openBtn.className = 'btn btn-secondary';
+    openBtn.textContent = 'Open report';
+    openBtn.addEventListener('click', () => openGitHistoryReport(repo));
+    actionsEl.appendChild(openBtn);
+    return;
+  }
 
-  const openBtn = document.createElement('button');
-  openBtn.type = 'button';
-  openBtn.className = 'btn btn-secondary';
-  openBtn.textContent = 'Open report';
-  openBtn.addEventListener('click', () => openGitHistoryReport(repo));
-  actionsEl.appendChild(openBtn);
+  const generateBtn = document.createElement('button');
+  generateBtn.type = 'button';
+  generateBtn.className = 'btn btn-secondary';
+  generateBtn.textContent = 'Generate report';
+  generateBtn.addEventListener('click', () => regenerateGitHistoryReportForProject(repo));
+  actionsEl.appendChild(generateBtn);
 }
 
 function renderGitHistoryReportContent(reportEl, status) {
   if (!status.exists) {
-    reportEl.innerHTML = '<p class="list-empty">Analyzing git history…</p>';
+    reportEl.innerHTML = '<p class="list-empty">No git history report yet. Generate one to analyze contributors, activity, and changed files.</p>';
     return;
   }
 
@@ -663,7 +671,7 @@ async function renderProjectGitHistoryReport(repo, { quiet = false } = {}) {
     return;
   }
 
-  await regenerateGitHistoryReportForProject(repo, { quiet });
+  updateGitHistoryReportWidget(repo, status);
 }
 
 async function renderProjectReadme(repoPath, { quiet = false } = {}) {
@@ -2229,13 +2237,7 @@ async function pullProjectRepo(repo, button, lastPullEl, branchSelect, branchSta
     await renderProjectGitActivity(repo.path, { quiet: true });
     await renderProjectPullRequests(updatedRepo, { quiet: true });
     await renderProjectReadme(repo.path, { quiet: true });
-
-    const reportStatus = gitHistoryReportStatusFromResult(result.gitHistoryReport);
-    if (reportStatus) {
-      updateGitHistoryReportWidget(updatedRepo, reportStatus);
-    } else {
-      await regenerateGitHistoryReportForProject(updatedRepo, { quiet: true });
-    }
+    await renderProjectGitHistoryReport(updatedRepo, { quiet: true });
 
     const remoteUrl = document.querySelector('.project-remote-url');
     if (remoteUrl && updatedRepo.remote) {
@@ -2255,7 +2257,6 @@ async function pullProjectRepo(repo, button, lastPullEl, branchSelect, branchSta
         releaseEl.classList.add('empty');
       }
     }
-
     void refreshDashboard({ preferCache: true });
   } catch (err) {
     await reportError(err, 'Git pull failed');
