@@ -547,12 +547,50 @@ function findVSCodeExecutable() {
   return null;
 }
 
+function findVisualStudioExecutableViaVswhere() {
+  const vswhereCandidates = [
+    path.join(process.env['ProgramFiles(x86)'] || '', 'Microsoft Visual Studio', 'Installer', 'vswhere.exe'),
+    path.join(process.env.ProgramFiles || '', 'Microsoft Visual Studio', 'Installer', 'vswhere.exe'),
+  ];
+
+  for (const vswhere of vswhereCandidates) {
+    if (!vswhere || !fs.existsSync(vswhere)) continue;
+
+    try {
+      const output = execSync(
+        `"${vswhere}" -latest -products * -requires Microsoft.Component.MSBuild -find Common7\\IDE\\devenv.exe`,
+        { encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] },
+      ).trim();
+      const devenv = output.split(/\r?\n/).map((line) => line.trim()).find(Boolean);
+      if (devenv && fs.existsSync(devenv)) {
+        return devenv;
+      }
+    } catch {
+      // try next candidate
+    }
+  }
+
+  return null;
+}
+
+function compareVisualStudioVersion(a, b) {
+  const versionA = Number.parseInt(a, 10);
+  const versionB = Number.parseInt(b, 10);
+  if (!Number.isNaN(versionA) && !Number.isNaN(versionB) && versionA !== versionB) {
+    return versionB - versionA;
+  }
+  return b.localeCompare(a, undefined, { numeric: true });
+}
+
 function findVisualStudioExecutable() {
   const roots = [
-    path.join(process.env['ProgramFiles(x86)'] || '', 'Microsoft Visual Studio'),
     path.join(process.env.ProgramFiles || '', 'Microsoft Visual Studio'),
+    path.join(process.env['ProgramFiles(x86)'] || '', 'Microsoft Visual Studio'),
   ];
-  const editions = ['Community', 'Professional', 'Enterprise', 'BuildTools', 'Preview'];
+  const editions = ['Community', 'Professional', 'Enterprise', 'Preview', 'BuildTools'];
+  const nonInstallDirs = new Set([
+    'Installer', 'Shared', 'VB', 'VC', 'VB98', 'VC98', 'Common', 'Xml',
+  ]);
 
   for (const root of roots) {
     if (!root || !fs.existsSync(root)) continue;
@@ -560,10 +598,9 @@ function findVisualStudioExecutable() {
     let versions;
     try {
       versions = fs.readdirSync(root, { withFileTypes: true })
-        .filter((entry) => entry.isDirectory())
+        .filter((entry) => entry.isDirectory() && !nonInstallDirs.has(entry.name))
         .map((entry) => entry.name)
-        .sort()
-        .reverse();
+        .sort(compareVisualStudioVersion);
     } catch {
       continue;
     }
@@ -581,57 +618,132 @@ function findVisualStudioExecutable() {
   return null;
 }
 
-function findSolutionFile(repoPath) {
-  try {
-    const sln = fs.readdirSync(repoPath).find((entry) => entry.endsWith('.sln'));
-    if (sln) return path.join(repoPath, sln);
-  } catch {
-    // ignore
+const VISUAL_STUDIO_SKIP_DIRS = new Set([
+  '.git', 'node_modules', 'bin', 'obj', 'packages', '.vs', '.idea',
+]);
+
+const VISUAL_STUDIO_OPEN_EXTENSIONS = [
+  { extensions: ['.sln'], priority: 0 },
+  { extensions: ['.slnx'], priority: 1 },
+  { extensions: ['.csproj', '.vbproj', '.fsproj'], priority: 2 },
+];
+
+function findVisualStudioEntryPoint(repoPath) {
+  const resolvedRepoPath = path.resolve(repoPath);
+  let best = null;
+
+  function consider(candidatePath, priority) {
+    const depth = candidatePath.slice(resolvedRepoPath.length).split(path.sep).filter(Boolean).length;
+    if (
+      !best
+      || priority < best.priority
+      || (priority === best.priority && depth < best.depth)
+      || (priority === best.priority && depth === best.depth && candidatePath.length < best.path.length)
+    ) {
+      best = { path: candidatePath, priority, depth };
+    }
   }
-  return null;
+
+  function walk(currentPath, depth, maxDepth = 5) {
+    if (depth > maxDepth) return;
+
+    let entries;
+    try {
+      entries = fs.readdirSync(currentPath, { withFileTypes: true });
+    } catch {
+      return;
+    }
+
+    for (const entry of entries) {
+      if (entry.isDirectory()) {
+        if (VISUAL_STUDIO_SKIP_DIRS.has(entry.name) || entry.name.startsWith('.')) continue;
+        walk(path.join(currentPath, entry.name), depth + 1, maxDepth);
+        continue;
+      }
+
+      const entryName = entry.name.toLowerCase();
+      for (const group of VISUAL_STUDIO_OPEN_EXTENSIONS) {
+        if (group.extensions.some((ext) => entryName.endsWith(ext))) {
+          consider(path.join(currentPath, entry.name), group.priority);
+          break;
+        }
+      }
+    }
+  }
+
+  walk(resolvedRepoPath, 0);
+  return best?.path || resolvedRepoPath;
 }
 
-function launchDetached(command, args) {
-  spawn(command, args, {
-    detached: true,
-    stdio: 'ignore',
-    windowsHide: true,
-  }).unref();
+function launchDetached(command, args = []) {
+  return new Promise((resolve, reject) => {
+    const executable = String(command || '').trim();
+    const launchArgs = Array.isArray(args) ? args : [];
+    let child;
+
+    if (process.platform === 'win32') {
+      const lowerExecutable = executable.toLowerCase();
+      if (lowerExecutable.endsWith('cmd.exe') || lowerExecutable.endsWith('.cmd') || lowerExecutable.endsWith('.bat')) {
+        child = spawn(executable, launchArgs, {
+          detached: true,
+          stdio: 'ignore',
+          windowsHide: true,
+        });
+      } else {
+        child = spawn('cmd.exe', ['/d', '/s', '/c', 'start', '""', executable, ...launchArgs], {
+          detached: true,
+          stdio: 'ignore',
+          windowsHide: true,
+        });
+      }
+    } else {
+      child = spawn(executable, launchArgs, {
+        detached: true,
+        stdio: 'ignore',
+      });
+    }
+
+    child.once('error', reject);
+    child.once('spawn', () => {
+      child.unref();
+      resolve();
+    });
+  });
 }
 
-function openInVSCode(repoPath) {
+async function openInVSCode(repoPath) {
   const codeExecutable = findVSCodeExecutable();
   if (!codeExecutable) {
     throw new Error('Visual Studio Code was not found. Install it or add the "code" command to PATH.');
   }
 
   if (codeExecutable.toLowerCase().endsWith('.cmd')) {
-    launchDetached('cmd', ['/c', codeExecutable, repoPath]);
+    await launchDetached('cmd', ['/c', codeExecutable, repoPath]);
   } else {
-    launchDetached(codeExecutable, [repoPath]);
+    await launchDetached(codeExecutable, [repoPath]);
   }
 }
 
-function openInVisualStudio(repoPath) {
-  const devenv = findVisualStudioExecutable();
+async function openInVisualStudio(repoPath) {
+  const devenv = findVisualStudioExecutableViaVswhere() || findVisualStudioExecutable();
   if (!devenv) {
     throw new Error('Visual Studio was not found. Install Visual Studio with the desktop development workload.');
   }
 
-  const solution = findSolutionFile(repoPath);
-  launchDetached(devenv, [solution || repoPath]);
+  const entryPoint = findVisualStudioEntryPoint(repoPath);
+  await launchDetached(devenv, [entryPoint]);
 }
 
-ipcMain.handle('ide:open', (_event, { ide, repoPath }) => {
+ipcMain.handle('ide:open', async (_event, { ide, repoPath }) => {
   try {
     if (!repoPath || !fs.existsSync(repoPath)) {
       return { ok: false, error: 'Repository folder not found.' };
     }
 
     if (ide === 'vscode') {
-      openInVSCode(repoPath);
+      await openInVSCode(repoPath);
     } else if (ide === 'visualstudio') {
-      openInVisualStudio(repoPath);
+      await openInVisualStudio(repoPath);
     } else {
       return { ok: false, error: `Unknown IDE: ${ide}` };
     }
