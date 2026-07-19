@@ -93,12 +93,25 @@ function updateNavActiveState(viewName) {
 }
 
 function updateProjectsSubmenuActive() {
-  const onProjectView = document.getElementById('view-project').classList.contains('active');
+  const onProjectView = document.getElementById('view-project')?.classList.contains('active');
+  const activePath = onProjectView && currentProject?.path
+    ? normalizeRepoPathKey(currentProject.path)
+    : null;
+
   document.querySelectorAll('.nav-btn-sub').forEach((btn) => {
-    const isActive = onProjectView
-      && Boolean(currentProject && btn.dataset.repoPath === currentProject.path);
+    const isActive = Boolean(
+      activePath && normalizeRepoPathKey(btn.dataset.repoPath) === activePath,
+    );
     btn.classList.toggle('active', isActive);
   });
+}
+
+function normalizeRepoPathKey(repoPath) {
+  return String(repoPath || '')
+    .trim()
+    .replace(/[\\/]+$/, '')
+    .replace(/\\/g, '/')
+    .toLowerCase();
 }
 
 function renderProjectsSubmenu(repos = cachedRepos) {
@@ -142,10 +155,10 @@ function renderProjectsSubmenu(repos = cachedRepos) {
 }
 
 function showView(name, { focusContent = false } = {}) {
-  updateNavActiveState(name);
   document.querySelectorAll('.view').forEach((v) => {
     v.classList.toggle('active', v.id === `view-${name}`);
   });
+  updateNavActiveState(name);
 
   if (name === 'terminal') {
     resizeActiveTerminal();
@@ -284,15 +297,18 @@ async function openProject(repo, { focusContent = false } = {}) {
   document.getElementById('project-title').textContent = repo.name;
   document.getElementById('project-path').textContent = repo.path;
 
-  updateNavActiveState('project');
   document.querySelectorAll('.view').forEach((v) => {
     v.classList.toggle('active', v.id === 'view-project');
   });
+  updateNavActiveState('project');
 
   try {
     await renderProjectView(repo, openId);
-    if (focusContent && openId === openProjectSeq) {
-      focusViewContent('project');
+    if (openId === openProjectSeq) {
+      updateProjectsSubmenuActive();
+      if (focusContent) {
+        focusViewContent('project');
+      }
     }
   } catch (err) {
     if (openId === openProjectSeq) {
