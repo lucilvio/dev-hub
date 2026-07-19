@@ -1788,6 +1788,93 @@ function buildGitHistoryReportSummary(analysis) {
   };
 }
 
+function parseMarkdownTableRows(markdown, sectionHeading) {
+  const sectionMatch = markdown.match(
+    new RegExp(`## ${sectionHeading}\\s*([\\s\\S]*?)(?=\\n## |\\n---|$)`, 'i'),
+  );
+  if (!sectionMatch) return [];
+
+  return sectionMatch[1]
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line.startsWith('|') && !/^\|\s*-+/.test(line) && !/^\|\s*Rank\b/i.test(line) && !/^\|\s*Day\b/i.test(line) && !/^\|\s*Metric\b/i.test(line))
+    .map((line) => line
+      .replace(/^\|/, '')
+      .replace(/\|$/, '')
+      .split('|')
+      .map((cell) => cell.trim()));
+}
+
+function parseGitHistoryReportSummaryFromMarkdown(markdown) {
+  if (!markdown) return null;
+
+  const totalMatch = markdown.match(/\*\*Total commits[^*]*:\*\*\s*(\d+)/i);
+  const contributorMatch = markdown.match(/## Greatest contributor\s+([^\n—]+)—\s*\*\*(\d+)\*\*/i);
+  const activityRows = parseMarkdownTableRows(markdown, 'Commit activity');
+  const dayRows = parseMarkdownTableRows(markdown, 'Days of the week with the most activity');
+  const fileRows = parseMarkdownTableRows(markdown, 'Top 10 most changed code files');
+
+  const activityByMetric = new Map(
+    activityRows.map((row) => [String(row[0] || '').toLowerCase(), Number.parseFloat(row[1])]),
+  );
+
+  const topFileRow = fileRows[0];
+  const topFilePath = topFileRow?.[1]?.replace(/^`|`$/g, '') || null;
+
+  const summary = {
+    totalCommits: totalMatch ? Number.parseInt(totalMatch[1], 10) : 0,
+    topContributor: contributorMatch
+      ? {
+        author: contributorMatch[1].trim(),
+        count: Number.parseInt(contributorMatch[2], 10),
+      }
+      : null,
+    topContributors: [],
+    activityRates: {
+      perDay: activityByMetric.get('commits per day') || 0,
+      perWeek: activityByMetric.get('commits per week') || 0,
+      perMonth: activityByMetric.get('commits per month') || 0,
+    },
+    busiestDay: dayRows[0]
+      ? {
+        day: dayRows[0][0],
+        count: Number.parseInt(dayRows[0][1], 10) || 0,
+      }
+      : null,
+    topChangedFile: topFilePath
+      ? {
+        filePath: topFilePath,
+        commits: Number.parseInt(topFileRow[2], 10) || 0,
+        linesChanged: Number.parseInt(topFileRow[3], 10) || 0,
+      }
+      : null,
+    bugFixFile: null,
+    leastChangedFile: null,
+  };
+
+  if (!summary.topContributor && !summary.topChangedFile && !summary.busiestDay) {
+    return null;
+  }
+
+  return summary;
+}
+
+function readGeneratedAtFromReport(markdown, reportPath) {
+  const generatedMatch = markdown.match(/\*\*Generated:\*\*\s*([^\n]+)/i);
+  if (generatedMatch) {
+    const parsed = new Date(generatedMatch[1].trim());
+    if (!Number.isNaN(parsed.getTime())) {
+      return parsed.toISOString();
+    }
+  }
+
+  try {
+    return fs.statSync(reportPath).mtime.toISOString();
+  } catch {
+    return null;
+  }
+}
+
 async function generateGitHistoryReport(repoPath, repoName) {
   if (!repoPath || !fs.existsSync(repoPath)) {
     throw new Error('Repository folder not found.');
@@ -1821,14 +1908,51 @@ async function getGitHistoryReportStatus(repoPath) {
   const reportPath = projectData.gitHistoryReportPath || getGitHistoryReportPath(repoPath);
   const exists = Boolean(reportPath && fs.existsSync(reportPath));
 
-  let summary = exists ? (projectData.gitHistoryReportSummary || null) : null;
-  let generatedAt = exists ? (projectData.gitHistoryReportAt || null) : null;
+  if (!exists) {
+    return {
+      exists: false,
+      generatedAt: null,
+      path: null,
+      summary: null,
+    };
+  }
+
+  let summary = projectData.gitHistoryReportSummary || null;
+  let generatedAt = projectData.gitHistoryReportAt || null;
+  let shouldPersist = false;
+
+  if (!summary || !generatedAt) {
+    try {
+      const markdown = fs.readFileSync(reportPath, 'utf8');
+      if (!summary) {
+        summary = parseGitHistoryReportSummaryFromMarkdown(markdown);
+        if (summary) {
+          projectData.gitHistoryReportSummary = summary;
+          shouldPersist = true;
+        }
+      }
+      if (!generatedAt) {
+        generatedAt = readGeneratedAtFromReport(markdown, reportPath);
+        if (generatedAt) {
+          projectData.gitHistoryReportAt = generatedAt;
+          projectData.gitHistoryReportPath = reportPath;
+          shouldPersist = true;
+        }
+      }
+    } catch {
+      // Keep whatever metadata we already have.
+    }
+  }
+
+  if (shouldPersist) {
+    setProjectData(repoPath, projectData);
+  }
 
   return {
-    exists,
-    generatedAt: exists ? generatedAt : null,
-    path: exists ? reportPath : null,
-    summary: exists ? summary : null,
+    exists: true,
+    generatedAt,
+    path: reportPath,
+    summary,
   };
 }
 
@@ -2632,9 +2756,12 @@ ipcMain.handle('repos:pull', async (_event, { repoPath }) => {
     const lastPullAt = new Date().toISOString();
     const projectData = getProjectData(repoPath);
     projectData.lastPullAt = lastPullAt;
-    projectData.gitHistoryReportSummary = null;
-    projectData.gitHistoryReportAt = null;
     setProjectData(repoPath, projectData);
+
+    const gitHistoryReport = await tryGenerateGitHistoryReport(
+      repoPath,
+      path.basename(repoPath),
+    );
 
     return {
       ok: true,
@@ -2642,7 +2769,7 @@ ipcMain.handle('repos:pull', async (_event, { repoPath }) => {
       lastPullAt,
       repo: getRepoInfo(repoPath),
       branches: listRepoBranches(repoPath, false),
-      gitHistoryReport: null,
+      gitHistoryReport,
     };
   } catch (err) {
     return { ok: false, error: err.message };
