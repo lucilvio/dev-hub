@@ -515,7 +515,7 @@ async function renderProjectPullRequests(repo, { quiet = false } = {}) {
 }
 
 function formatGitReportDate(iso) {
-  if (!iso) return '';
+  if (!iso) return 'recently';
   return new Date(iso).toLocaleString();
 }
 
@@ -668,6 +668,11 @@ async function renderProjectGitHistoryReport(repo, { quiet = false } = {}) {
 
   if (status.exists && status.summary) {
     updateGitHistoryReportWidget(repo, status);
+    return;
+  }
+
+  if (status.exists && !status.summary) {
+    await regenerateGitHistoryReportForProject(repo, { quiet: true });
     return;
   }
 
@@ -2237,7 +2242,13 @@ async function pullProjectRepo(repo, button, lastPullEl, branchSelect, branchSta
     await renderProjectGitActivity(repo.path, { quiet: true });
     await renderProjectPullRequests(updatedRepo, { quiet: true });
     await renderProjectReadme(repo.path, { quiet: true });
-    await renderProjectGitHistoryReport(updatedRepo, { quiet: true });
+
+    const reportStatus = gitHistoryReportStatusFromResult(result.gitHistoryReport);
+    if (reportStatus) {
+      updateGitHistoryReportWidget(updatedRepo, reportStatus);
+    } else {
+      await renderProjectGitHistoryReport(updatedRepo, { quiet: true });
+    }
 
     const remoteUrl = document.querySelector('.project-remote-url');
     if (remoteUrl && updatedRepo.remote) {
