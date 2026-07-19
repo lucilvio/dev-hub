@@ -28,6 +28,49 @@ function installGlobalErrorHandlers() {
   });
 }
 
+const appBusyTasks = new Map();
+let appBusySeq = 0;
+
+function renderAppBusy() {
+  const busyEl = document.getElementById('app-busy');
+  const labelEl = document.getElementById('app-busy-label');
+  const barEl = document.getElementById('app-busy-bar');
+  if (!busyEl || !labelEl || !barEl) return;
+
+  const labels = [...appBusyTasks.values()];
+  const isBusy = labels.length > 0;
+  const label = labels[labels.length - 1] || 'Working…';
+
+  busyEl.classList.toggle('hidden', !isBusy);
+  barEl.classList.toggle('hidden', !isBusy);
+  busyEl.setAttribute('aria-hidden', isBusy ? 'false' : 'true');
+  barEl.setAttribute('aria-hidden', isBusy ? 'false' : 'true');
+  document.body.classList.toggle('app-is-busy', isBusy);
+  labelEl.textContent = label;
+}
+
+function beginAppBusy(label = 'Working…') {
+  const id = ++appBusySeq;
+  appBusyTasks.set(id, label);
+  renderAppBusy();
+  return id;
+}
+
+function endAppBusy(id) {
+  if (id == null) return;
+  appBusyTasks.delete(id);
+  renderAppBusy();
+}
+
+async function withAppBusy(label, task) {
+  const id = beginAppBusy(label);
+  try {
+    return await task();
+  } finally {
+    endAppBusy(id);
+  }
+}
+
 let settings = null;
 let workspaces = { activeId: null, workspaces: [] };
 let currentProject = null;
@@ -302,6 +345,7 @@ async function openProject(repo, { focusContent = false } = {}) {
   });
   updateNavActiveState('project');
 
+  const busyId = beginAppBusy(`Loading ${repo.name}…`);
   try {
     await renderProjectView(repo, openId);
     if (openId === openProjectSeq) {
@@ -314,6 +358,8 @@ async function openProject(repo, { focusContent = false } = {}) {
     if (openId === openProjectSeq) {
       await reportError(err, 'Project');
     }
+  } finally {
+    endAppBusy(busyId);
   }
 }
 
@@ -653,19 +699,21 @@ async function regenerateGitHistoryReportForProject(repo, { quiet = false } = {}
     actionsEl.innerHTML = '';
   }
 
-  const result = await api.repos.generateGitHistoryReport(repo.path, repo.name);
+  return withAppBusy('Analyzing git history…', async () => {
+    const result = await api.repos.generateGitHistoryReport(repo.path, repo.name);
 
-  if (!result.ok) {
-    if (reportEl) {
-      reportEl.innerHTML = '<p class="list-empty">Could not generate git history report.</p>';
+    if (!result.ok) {
+      if (reportEl) {
+        reportEl.innerHTML = '<p class="list-empty">Could not generate git history report.</p>';
+      }
+      if (!quiet) await reportError(result.error, 'Git history report');
+      return null;
     }
-    if (!quiet) await reportError(result.error, 'Git history report');
-    return null;
-  }
 
-  const status = gitHistoryReportStatusFromResult(result);
-  updateGitHistoryReportWidget(repo, status);
-  return status;
+    const status = gitHistoryReportStatusFromResult(result);
+    updateGitHistoryReportWidget(repo, status);
+    return status;
+  });
 }
 
 async function renderProjectGitHistoryReport(repo, { quiet = false } = {}) {
@@ -906,27 +954,29 @@ function applyRepoReleaseWarnings(repos, warnings) {
 async function enrichRepoReleaseWarnings(repos, requestId = repoScanRequestId) {
   if (!repos.length || requestId !== repoScanRequestId) return repos;
 
-  try {
-    const result = await api.repos.scanReleaseWarnings(repos.map((repo) => repo.path));
-    if (!result.ok || requestId !== repoScanRequestId) return repos;
+  return withAppBusy('Checking release status…', async () => {
+    try {
+      const result = await api.repos.scanReleaseWarnings(repos.map((repo) => repo.path));
+      if (!result.ok || requestId !== repoScanRequestId) return repos;
 
-    const enriched = applyRepoReleaseWarnings(repos, result.warnings);
-    cachedRepos = enriched;
-    repoScanFetchedAt = Date.now();
-    renderProjectsSubmenu(enriched);
+      const enriched = applyRepoReleaseWarnings(repos, result.warnings);
+      cachedRepos = enriched;
+      repoScanFetchedAt = Date.now();
+      renderProjectsSubmenu(enriched);
 
-    if (document.getElementById('view-repos')?.classList.contains('active')) {
-      renderLocalProjectsList(enriched);
+      if (document.getElementById('view-repos')?.classList.contains('active')) {
+        renderLocalProjectsList(enriched);
+      }
+
+      if (document.getElementById('view-dashboard')?.classList.contains('active')) {
+        renderDashboardProjectCards(enriched);
+      }
+
+      return enriched;
+    } catch {
+      return repos;
     }
-
-    if (document.getElementById('view-dashboard')?.classList.contains('active')) {
-      renderDashboardProjectCards(enriched);
-    }
-
-    return enriched;
-  } catch {
-    return repos;
-  }
+  });
 }
 
 async function fetchRepos({ force = false } = {}) {
@@ -938,17 +988,19 @@ async function fetchRepos({ force = false } = {}) {
     return cachedRepos;
   }
 
-  const requestId = ++repoScanRequestId;
-  const repos = await api.repos.scan();
-  if (requestId !== repoScanRequestId) {
-    return cachedRepos;
-  }
+  return withAppBusy('Scanning repositories…', async () => {
+    const requestId = ++repoScanRequestId;
+    const repos = await api.repos.scan();
+    if (requestId !== repoScanRequestId) {
+      return cachedRepos;
+    }
 
-  cachedRepos = repos;
-  repoScanFetchedAt = Date.now();
-  renderProjectsSubmenu(repos);
-  void enrichRepoReleaseWarnings(repos, requestId);
-  return repos;
+    cachedRepos = repos;
+    repoScanFetchedAt = Date.now();
+    renderProjectsSubmenu(repos);
+    void enrichRepoReleaseWarnings(repos, requestId);
+    return repos;
+  });
 }
 
 function renderDashboardProjectCards(repos) {
@@ -1837,37 +1889,39 @@ async function loadRemoteRepos(localRepos = null) {
   listEl.innerHTML = '<p class="empty-state">Loading remote repositories…</p>';
   setRemoteReposStatus('');
 
-  try {
-    const result = await api.azure.listRepositories(localRepos);
+  return withAppBusy('Loading remote repositories…', async () => {
+    try {
+      const result = await api.azure.listRepositories(localRepos);
 
-    if (!result.ok) {
-      listEl.innerHTML = `<p class="empty-state">${escapeHtml(result.error)}</p>`;
-      setRemoteReposStatus(result.error, 'error');
-      return;
+      if (!result.ok) {
+        listEl.innerHTML = `<p class="empty-state">${escapeHtml(result.error)}</p>`;
+        setRemoteReposStatus(result.error, 'error');
+        return;
+      }
+
+      const { repositories, organization, project } = result;
+      const remoteCount = repositories.filter((repo) => !repo.isLocal).length;
+      const localCount = repositories.filter((repo) => repo.isLocal).length;
+      setRemoteReposStatus(
+        `${repositories.length} repositories in ${organization}/${project} · ${localCount} local · ${remoteCount} available to clone`,
+        'ok',
+      );
+
+      if (repositories.length === 0) {
+        listEl.innerHTML = '<p class="empty-state">No Git repositories found in this Azure DevOps project.</p>';
+        return;
+      }
+
+      listEl.innerHTML = '';
+      repositories.forEach((remoteRepo) => {
+        listEl.appendChild(createRemoteRepoItem(remoteRepo, { organization, project }));
+      });
+    } catch (err) {
+      listEl.innerHTML = '<p class="empty-state">Could not load remote repositories.</p>';
+      setRemoteReposStatus(formatErrorMessage(err), 'error');
+      await reportError(err, 'Remote repositories');
     }
-
-    const { repositories, organization, project } = result;
-    const remoteCount = repositories.filter((repo) => !repo.isLocal).length;
-    const localCount = repositories.filter((repo) => repo.isLocal).length;
-    setRemoteReposStatus(
-      `${repositories.length} repositories in ${organization}/${project} · ${localCount} local · ${remoteCount} available to clone`,
-      'ok',
-    );
-
-    if (repositories.length === 0) {
-      listEl.innerHTML = '<p class="empty-state">No Git repositories found in this Azure DevOps project.</p>';
-      return;
-    }
-
-    listEl.innerHTML = '';
-    repositories.forEach((remoteRepo) => {
-      listEl.appendChild(createRemoteRepoItem(remoteRepo, { organization, project }));
-    });
-  } catch (err) {
-    listEl.innerHTML = '<p class="empty-state">Could not load remote repositories.</p>';
-    setRemoteReposStatus(formatErrorMessage(err), 'error');
-    await reportError(err, 'Remote repositories');
-  }
+  });
 }
 
 async function loadLocalProjects({ force = false } = {}) {
@@ -1970,30 +2024,32 @@ async function loadTasks() {
   listEl.innerHTML = '<li class="empty">Loading tasks…</li>';
   statusEl.classList.add('hidden');
 
-  try {
-    const result = await api.azure.fetchTasks();
+  return withAppBusy('Loading tasks…', async () => {
+    try {
+      const result = await api.azure.fetchTasks();
 
-    if (!(await ensureApiOk(result, 'Tasks'))) {
+      if (!(await ensureApiOk(result, 'Tasks'))) {
+        listEl.innerHTML = '';
+        statusEl.textContent = formatErrorMessage(result.error);
+        statusEl.classList.remove('hidden');
+        statusEl.classList.remove('info');
+        return [];
+      }
+
+      renderTaskRows(listEl, result.tasks, {
+        emptyMessage: 'No open tasks assigned to you.',
+      });
+
+      return result.tasks;
+    } catch (err) {
       listEl.innerHTML = '';
-      statusEl.textContent = formatErrorMessage(result.error);
+      statusEl.textContent = formatErrorMessage(err);
       statusEl.classList.remove('hidden');
       statusEl.classList.remove('info');
+      await reportError(err, 'Tasks');
       return [];
     }
-
-    renderTaskRows(listEl, result.tasks, {
-      emptyMessage: 'No open tasks assigned to you.',
-    });
-
-    return result.tasks;
-  } catch (err) {
-    listEl.innerHTML = '';
-    statusEl.textContent = formatErrorMessage(err);
-    statusEl.classList.remove('hidden');
-    statusEl.classList.remove('info');
-    await reportError(err, 'Tasks');
-    return [];
-  }
+  });
 }
 
 document.getElementById('tasks-refresh').addEventListener('click', (e) => {
@@ -2158,24 +2214,26 @@ async function refreshDashboard({ preferCache = false, force = false } = {}) {
     return;
   }
 
-  const repos = await fetchRepos({ force });
-  document.getElementById('dash-repo-count').textContent = repos.length;
-  renderDashboardProjectCards(repos);
+  return withAppBusy('Refreshing dashboard…', async () => {
+    const repos = await fetchRepos({ force });
+    document.getElementById('dash-repo-count').textContent = repos.length;
+    renderDashboardProjectCards(repos);
 
-  const taskResult = await api.azure.fetchTasks();
-  const tasks = taskResult.ok ? taskResult.tasks : [];
-  document.getElementById('dash-task-count').textContent = taskResult.ok ? tasks.length : '—';
+    const taskResult = await api.azure.fetchTasks();
+    const tasks = taskResult.ok ? taskResult.tasks : [];
+    document.getElementById('dash-task-count').textContent = taskResult.ok ? tasks.length : '—';
 
-  const tasksList = document.getElementById('dash-tasks');
-  if (!taskResult.ok) {
-    tasksList.innerHTML = `<li class="empty">${escapeHtml(taskResult.error)}</li>`;
-  } else {
-    renderTaskRows(tasksList, tasks, {
-      limit: 5,
-      emptyMessage: 'No open tasks',
-      titleMaxLength: null,
-    });
-  }
+    const tasksList = document.getElementById('dash-tasks');
+    if (!taskResult.ok) {
+      tasksList.innerHTML = `<li class="empty">${escapeHtml(taskResult.error)}</li>`;
+    } else {
+      renderTaskRows(tasksList, tasks, {
+        limit: 5,
+        emptyMessage: 'No open tasks',
+        titleMaxLength: null,
+      });
+    }
+  });
 }
 
 document.getElementById('dashboard-refresh').addEventListener('click', (e) => {
@@ -2233,6 +2291,7 @@ function createBranchBadge(branch) {
 async function pullProjectRepo(repo, button, lastPullEl, branchSelect, branchState) {
   button.disabled = true;
   button.classList.add('spinning');
+  const busyId = beginAppBusy(`Pulling ${repo.name}…`);
 
   try {
     const result = await api.repos.pull(repo.path);
@@ -2288,6 +2347,7 @@ async function pullProjectRepo(repo, button, lastPullEl, branchSelect, branchSta
   } catch (err) {
     await reportError(err, 'Git pull failed');
   } finally {
+    endAppBusy(busyId);
     button.disabled = false;
     button.classList.remove('spinning');
   }
